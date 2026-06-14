@@ -19,3 +19,7 @@ keys/firebase.json
 .idea/
 .vscode/
 postgres_data/
+media/
+scripts/
+check_schema.py
+DIAGNOSTIC_API.md

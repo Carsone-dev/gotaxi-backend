@@ -16,11 +16,14 @@ class ConnectionManager:
             del self._connections[channel]
 
     async def broadcast(self, channel: str, message: dict):
+        dead: list[WebSocket] = []
         for ws in self._connections.get(channel, set()).copy():
             try:
                 await ws.send_json(message)
             except Exception:
-                self.disconnect(channel, ws)
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(channel, ws)
 
     async def send_to(self, channel: str, ws: WebSocket, message: dict):
         try:

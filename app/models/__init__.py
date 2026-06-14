@@ -11,6 +11,11 @@ from app.models.transaction import Transaction, TransactionType, TransactionStat
 from app.models.avis import Avis
 from app.models.notification import Notification
 from app.models.audit import AuditLog
+from app.models.tarif_trajet import TarifTrajet
+from app.models.ville import Ville
+from app.models.gare import Gare
+from app.models.payout_account import ComptePayoutChauffeur
+from app.models.demande_chauffeur import DemandeInscriptionChauffeur, DemandeStatut
 
 __all__ = [
     "Base",
@@ -26,4 +31,9 @@ __all__ = [
     "Avis",
     "Notification",
     "AuditLog",
+    "TarifTrajet",
+    "Ville",
+    "Gare",
+    "ComptePayoutChauffeur",
+    "DemandeInscriptionChauffeur", "DemandeStatut",
 ]

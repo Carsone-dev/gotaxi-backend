@@ -6,9 +6,11 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.voyage import Voyage, VoyageStatut
 from app.models.colis import Colis
+from app.models.demande_chauffeur import DemandeInscriptionChauffeur
 from app.schemas.voyage import VoyageRead
 from app.schemas.colis import ColisRead
-from app.schemas.common import PaginatedResponse
+from app.schemas.common import PaginatedResponse, MessageResponse
+from app.schemas.demande_chauffeur import DemandeChauffeurCreate
 
 router = APIRouter(prefix="/public", tags=["Public"])
 
@@ -88,6 +90,18 @@ async def public_search_voyages(
 
     pages = max(1, -(-total // size))
     return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
+
+
+@router.post("/demandes-chauffeur", response_model=MessageResponse, status_code=201)
+async def submit_demande_chauffeur(
+    payload: DemandeChauffeurCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Soumission publique d'une candidature chauffeur (sans authentification)."""
+    demande = DemandeInscriptionChauffeur(**payload.model_dump())
+    db.add(demande)
+    await db.commit()
+    return MessageResponse(message="Candidature reçue. Notre équipe vous contactera dans les 24h.")
 
 
 @router.get("/colis/{code_suivi}", response_model=ColisRead)

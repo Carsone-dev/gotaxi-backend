@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 
 
 class RegisterRequest(BaseModel):
-    telephone: str = Field(..., pattern=r"^\+229\d{10}$|^\+228\d{8}$")
+    telephone: str = Field(..., pattern=r"^\+\d{8,15}$")
     nom: str = Field(..., min_length=2, max_length=100)
     prenom: str = Field(..., min_length=2, max_length=100)
     password: str = Field(..., min_length=8)
@@ -10,7 +10,7 @@ class RegisterRequest(BaseModel):
 
 
 class RegisterChauffeurRequest(BaseModel):
-    telephone: str = Field(..., pattern=r"^\+229\d{10}$|^\+228\d{8}$")
+    telephone: str = Field(..., pattern=r"^\+\d{8,15}$")
     nom: str = Field(..., min_length=2, max_length=100)
     prenom: str = Field(..., min_length=2, max_length=100)
     password: str = Field(..., min_length=8)

@@ -6,14 +6,16 @@ from app.models.user import User
 from app.models.wallet import Wallet
 from app.models.transaction import Transaction, TransactionType, TransactionStatut, TransactionOperateur
 from app.schemas.wallet import (
-    WalletRead, RechargeInitiateRequest, WithdrawRequest,
-    TransferRequest, TransactionRead,
+    WalletRead, WalletPublic, RechargeInitiateRequest, RechargeInitiateResponse,
+    WithdrawRequest, TransferRequest, TransactionRead,
 )
 from app.schemas.common import MessageResponse, PaginatedResponse
 from app.dependencies import get_current_user
 from app.integrations.mtn_momo import mtn_momo, MTNMoMoError
 from app.integrations.orange_money import orange_money, OrangeMoneyError
 from app.integrations.moov_money import moov_money, MoovMoneyError
+from app.integrations.celtis import celtis, CeltisError
+from app.integrations.fedapay import fedapay, FedaPayError
 from app.core.logging import logger
 from fastapi import Query
 
@@ -55,7 +57,7 @@ async def wallet_activity(
     return PaginatedResponse(items=items, total=len(items), page=page, size=size, pages=1)
 
 
-@router.post("/me/recharge/initiate", response_model=MessageResponse)
+@router.post("/me/recharge/initiate", response_model=RechargeInitiateResponse)
 async def initiate_recharge(
     payload: RechargeInitiateRequest,
     db: AsyncSession = Depends(get_db),
@@ -95,10 +97,33 @@ async def initiate_recharge(
             await db.commit()
             return {"message": f"Recharge Moov Money initiée. Confirmez le paiement sur le {payload.telephone}."}
 
+        elif payload.operateur == TransactionOperateur.CELTIS:
+            ref = await celtis.collect(payload.montant, payload.telephone, str(transaction.id))
+            transaction.reference_externe = ref
+            await db.commit()
+            return RechargeInitiateResponse(
+                message=f"Recharge Celtis initiée. Confirmez le paiement USSD sur le {payload.telephone}."
+            )
+
+        elif payload.operateur == TransactionOperateur.FEDAPAY:
+            tx_id = await fedapay.create_transaction(
+                amount=payload.montant,
+                description="Recharge wallet GoTaxi",
+            )
+            token_data = await fedapay.get_payment_token(tx_id)
+            # On stocke l'id numérique FedaPay comme référence externe
+            transaction.reference_externe = str(tx_id)
+            await db.commit()
+            payment_url = token_data.get("payment_url") or token_data.get("url", "")
+            return RechargeInitiateResponse(
+                message=f"Recharge FedaPay initiée. Ouvrez le lien de paiement et choisissez votre opérateur Mobile Money.",
+                payment_url=payment_url,
+            )
+
         else:
             raise HTTPException(status_code=400, detail="Opérateur non supporté")
 
-    except (MTNMoMoError, OrangeMoneyError, MoovMoneyError) as e:
+    except (MTNMoMoError, OrangeMoneyError, MoovMoneyError, CeltisError, FedaPayError) as e:
         transaction.statut = TransactionStatut.ECHEC
         await db.commit()
         logger.error("recharge_initiate_failed", operateur=payload.operateur, error=str(e))
@@ -140,10 +165,21 @@ async def confirm_recharge(
             success_statuses = {"SUCCESS", "SUCCESSFUL"}
             failed_statuses = {"FAILED", "CANCELLED"}
 
+        elif transaction.operateur == TransactionOperateur.CELTIS:
+            status_data = await celtis.get_status(transaction.reference_externe)
+            op_status = status_data.get("status", "")
+            success_statuses = {"SUCCESS", "SUCCESSFUL", "COMPLETED"}
+            failed_statuses = {"FAILED", "CANCELLED", "EXPIRED", "REJECTED"}
+
+        elif transaction.operateur == TransactionOperateur.FEDAPAY:
+            op_status = await fedapay.get_transaction_status(int(transaction.reference_externe))
+            success_statuses = {"approved", "transferred"}
+            failed_statuses = {"declined", "cancelled", "refunded"}
+
         else:
             raise HTTPException(status_code=400, detail="Opérateur non supporté")
 
-    except (MTNMoMoError, OrangeMoneyError, MoovMoneyError) as e:
+    except (MTNMoMoError, OrangeMoneyError, MoovMoneyError, CeltisError, FedaPayError) as e:
         logger.error("recharge_confirm_failed", tx_id=transaction_id, error=str(e))
         raise HTTPException(status_code=502, detail=f"Erreur vérification opérateur : {str(e)}")
 
@@ -202,13 +238,28 @@ async def withdraw(
             await db.commit()
             return {"message": f"Retrait Moov Money de {payload.montant} XOF en cours de traitement."}
 
+        elif payload.operateur == TransactionOperateur.CELTIS:
+            ref = await celtis.disburse(payload.montant, payload.telephone, str(transaction.id))
+            transaction.reference_externe = ref
+            transaction.statut = TransactionStatut.EN_COURS
+            await db.commit()
+            return {"message": f"Retrait Celtis de {payload.montant} XOF initié vers {payload.telephone}."}
+
+        elif payload.operateur == TransactionOperateur.FEDAPAY:
+            payout_id = await fedapay.create_payout(payload.montant, payload.telephone)
+            await fedapay.send_payout(payout_id)
+            transaction.reference_externe = str(payout_id)
+            transaction.statut = TransactionStatut.EN_COURS
+            await db.commit()
+            return {"message": f"Retrait FedaPay de {payload.montant} XOF initié vers {payload.telephone}."}
+
         else:
             wallet.solde += payload.montant
             transaction.statut = TransactionStatut.ANNULE
             await db.commit()
             raise HTTPException(status_code=400, detail="Opérateur non supporté")
 
-    except MTNMoMoError as e:
+    except (MTNMoMoError, CeltisError, FedaPayError) as e:
         wallet.solde += payload.montant
         transaction.statut = TransactionStatut.ECHEC
         await db.commit()
@@ -260,4 +311,38 @@ async def transfer(
         montant=payload.montant,
     )
     db.add_all([tx_out, tx_in])
-    return {"message": f"Transfert de {payload.montant} XOF effectué"}
+    await db.commit()
+    return {"message": f"Transfert de {payload.montant} XOF effectué vers {payload.destinataire_telephone}."}
+
+
+@router.get("/search", response_model=WalletPublic)
+async def search_wallet(
+    telephone: str = Query(..., min_length=8, description="Numéro de téléphone GoTaxi à rechercher"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recherche le wallet d'un utilisateur par numéro de téléphone."""
+    from app.models.user import User as UserModel
+    from sqlalchemy import select as sa_select
+
+    user_result = await db.execute(
+        sa_select(UserModel).where(UserModel.telephone == telephone)
+    )
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable")
+
+    wallet_result = await db.execute(
+        select(Wallet).where(Wallet.user_id == user.id)
+    )
+    wallet = wallet_result.scalar_one_or_none()
+    if not wallet:
+        raise HTTPException(status_code=404, detail="Wallet introuvable")
+
+    return WalletPublic(
+        user_id=user.id,
+        nom=user.nom,
+        prenom=user.prenom,
+        telephone=user.telephone,
+        actif=wallet.actif,
+    )

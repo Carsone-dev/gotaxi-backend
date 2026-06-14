@@ -44,8 +44,11 @@ class ChauffeurRead(BaseModel):
     id: UUID
     user_id: UUID
     cin_numero: str | None
+    cin_url: str | None
     permis_numero: str | None
+    permis_url: str | None
     permis_expiration: date | None
+    casier_judiciaire_url: str | None
     kyc_valide: bool
     kyc_valide_le: date | None
     autorisation_transfrontaliere: bool

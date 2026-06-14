@@ -15,6 +15,9 @@ from app.schemas.reservation import ReservationRead
 from app.schemas.common import PaginatedResponse, MessageResponse
 from app.dependencies import get_current_user, require_role
 from app.exceptions import KYCNotValidatedException
+from app.models.tarif_trajet import TarifTrajet
+from app.models.ville import Ville
+from app.services.payout import payer_chauffeur
 
 router = APIRouter(prefix="/voyages", tags=["Voyages"])
 
@@ -146,6 +149,21 @@ async def popular_voyages(db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
+@router.get("/active", response_model=list[VoyageRead])
+async def active_voyages(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Voyages EN_COURS — affichage carte en temps réel."""
+    result = await db.execute(
+        select(Voyage)
+        .where(Voyage.statut == VoyageStatut.EN_COURS)
+        .order_by(Voyage.date_depart.desc())
+        .limit(50)
+    )
+    return result.scalars().all()
+
+
 @router.get("/me", response_model=list[VoyageRead])
 async def my_voyages(
     db: AsyncSession = Depends(get_db),
@@ -178,6 +196,20 @@ async def create_voyage(
     vehicule = await db.get(Vehicule, payload.vehicule_id)
     if not vehicule or vehicule.chauffeur_id != chauffeur.id or not vehicule.actif:
         raise HTTPException(status_code=404, detail="Véhicule introuvable ou inactif")
+
+    tarif_result = await db.execute(
+        select(TarifTrajet).where(
+            TarifTrajet.ville_depart.has(Ville.nom == payload.ville_depart),
+            TarifTrajet.ville_arrivee.has(Ville.nom == payload.ville_arrivee),
+            TarifTrajet.actif == True,
+        )
+    )
+    tarif = tarif_result.scalar_one_or_none()
+    if tarif and payload.prix_par_place > tarif.prix_max:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prix maximum autorisé pour ce trajet : {tarif.prix_max} FCFA",
+        )
 
     voyage = Voyage(
         **payload.model_dump(),
@@ -266,6 +298,17 @@ async def end_voyage(
     voyage = await _get_voyage_owned_or_403(voyage_id, chauffeur_id, db)
     if voyage.statut != VoyageStatut.EN_COURS:
         raise HTTPException(status_code=400, detail="Seul un voyage EN_COURS peut être terminé")
+
+    # Récupérer les réservations CONFIRMEE pour calculer le montant à reverser
+    resa_result = await db.execute(
+        select(Reservation).where(
+            Reservation.voyage_id == voyage_id,
+            Reservation.statut == ReservationStatut.CONFIRMEE,
+        )
+    )
+    reservations_confirmees = resa_result.scalars().all()
+    montant_total = sum(r.prix_total for r in reservations_confirmees)
+
     voyage.statut = VoyageStatut.TERMINE
     await db.execute(
         sa_update(Reservation)
@@ -275,6 +318,20 @@ async def end_voyage(
         )
         .values(statut=ReservationStatut.TERMINEE)
     )
+
+    # Charger le chauffeur complet pour le payout
+    chauffeur_result = await db.execute(select(Chauffeur).where(Chauffeur.id == chauffeur_id))
+    chauffeur = chauffeur_result.scalar_one()
+    chauffeur.nombre_trajets += 1
+
+    if montant_total > 0:
+        await payer_chauffeur(
+            chauffeur=chauffeur,
+            montant=montant_total,
+            db=db,
+            description=f"Reversement voyage {voyage_id}",
+        )
+
     await db.commit()
     return {"message": "Voyage terminé"}
 

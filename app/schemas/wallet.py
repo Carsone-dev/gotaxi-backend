@@ -4,6 +4,14 @@ from pydantic import BaseModel, Field
 from app.models.transaction import TransactionType, TransactionStatut, TransactionOperateur
 
 
+class WalletPublic(BaseModel):
+    user_id: UUID
+    nom: str
+    prenom: str
+    telephone: str
+    actif: bool
+
+
 class WalletRead(BaseModel):
     id: UUID
     solde: int
@@ -11,6 +19,11 @@ class WalletRead(BaseModel):
     actif: bool
 
     model_config = {"from_attributes": True}
+
+
+class RechargeInitiateResponse(BaseModel):
+    message: str
+    payment_url: str | None = None
 
 
 class RechargeInitiateRequest(BaseModel):

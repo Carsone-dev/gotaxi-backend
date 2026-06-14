@@ -1,7 +1,9 @@
 import secrets
 import string
+import uuid as _uuid
+from pathlib import Path
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -13,6 +15,14 @@ from app.models.voyage import Voyage, VoyageStatut
 from app.schemas.colis import ColisCreate, ColisRead
 from app.dependencies import get_current_user
 from app.services.colis_pricing import calculer_prix_colis
+from app.services.payout import debiter_wallet_client, payer_chauffeur
+from app.models.transaction import TransactionType
+
+_MEDIA_DIR = Path(__file__).resolve().parents[2] / "media" / "colis"
+_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+_ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp"}
+_MAX_SIZE_BYTES = 8 * 1024 * 1024  # 8 Mo
 
 _STATUTS_COLIS_ACCEPTES = {VoyageStatut.PUBLIE, VoyageStatut.COMPLET, VoyageStatut.EN_COURS}
 
@@ -168,7 +178,46 @@ async def colis_du_voyage(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Détail d'un colis
+# 3. Upload photo d'un colis (client expéditeur uniquement)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{colis_id}/photo", response_model=ColisRead)
+async def upload_colis_photo(
+    request: Request,
+    colis_id: UUID,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    colis = await _get_colis_with_voyage(colis_id, db)
+    if colis.expediteur_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Vous n'êtes pas l'expéditeur de ce colis")
+
+    content_type = file.content_type or ""
+    if content_type not in _ALLOWED_MIME:
+        raise HTTPException(status_code=415, detail="Format non supporté. Utilisez JPEG, PNG ou WebP.")
+
+    data = await file.read()
+    if len(data) > _MAX_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Fichier trop volumineux (max 8 Mo)")
+
+    ext = content_type.split("/")[-1].replace("jpeg", "jpg")
+    filename = f"{_uuid.uuid4().hex}.{ext}"
+    dest = _MEDIA_DIR / filename
+    dest.write_bytes(data)
+
+    base = str(request.base_url).rstrip("/")
+    colis.photo_url = f"{base}/media/colis/{filename}"
+    await db.commit()
+
+    result = await db.execute(
+        select(Colis).options(selectinload(Colis.voyage)).where(Colis.id == colis_id)
+    )
+    return result.scalar_one()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Détail d'un colis
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/{colis_id}", response_model=ColisRead)
@@ -194,7 +243,7 @@ async def get_colis(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Annuler un colis (client ou chauffeur)
+# 5. Annuler un colis (client ou chauffeur)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/annuler", response_model=ColisRead)
@@ -232,12 +281,38 @@ async def confirmer_colis(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from app.models.colis import ColisModalitePaiement
     colis = await _get_colis_with_voyage(colis_id, db)
     _require_statut(colis, ColisStatut.EN_ATTENTE)
     await _require_chauffeur_owns_voyage(colis, current_user, db)
 
     colis.statut = ColisStatut.CONFIRME
     await db.flush()
+
+    # Paiement immédiat si modalité A_LA_CONFIRMATION
+    if colis.modalite_paiement == ColisModalitePaiement.A_LA_CONFIRMATION and colis.prix:
+        montant = int(colis.prix)
+        await debiter_wallet_client(
+            client_user_id=colis.expediteur_id,
+            montant=montant,
+            type_transaction=TransactionType.PAIEMENT_COLIS,
+            db=db,
+            reference_id=str(colis.id),
+        )
+        # Reverser immédiatement au chauffeur
+        chauffeur_result = await db.execute(
+            select(Chauffeur).where(Chauffeur.id == colis.voyage.chauffeur_id)
+        )
+        chauffeur = chauffeur_result.scalar_one_or_none()
+        if chauffeur:
+            await payer_chauffeur(
+                chauffeur=chauffeur,
+                montant=montant,
+                db=db,
+                description=f"Frais colis {colis.code_suivi}",
+            )
+
+    await db.commit()
     return await _reload_colis(colis.id, db)
 
 
@@ -276,10 +351,35 @@ async def livrer_colis(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from app.models.colis import ColisModalitePaiement
     colis = await _get_colis_with_voyage(colis_id, db)
     _require_statut(colis, ColisStatut.EN_TRANSIT)
     await _require_chauffeur_owns_voyage(colis, current_user, db)
 
     colis.statut = ColisStatut.LIVRE
     await db.flush()
+
+    # Paiement + reversement à la livraison si modalité A_LA_LIVRAISON
+    if colis.modalite_paiement == ColisModalitePaiement.A_LA_LIVRAISON and colis.prix:
+        montant = int(colis.prix)
+        await debiter_wallet_client(
+            client_user_id=colis.expediteur_id,
+            montant=montant,
+            type_transaction=TransactionType.PAIEMENT_COLIS,
+            db=db,
+            reference_id=str(colis.id),
+        )
+        chauffeur_result = await db.execute(
+            select(Chauffeur).where(Chauffeur.id == colis.voyage.chauffeur_id)
+        )
+        chauffeur = chauffeur_result.scalar_one_or_none()
+        if chauffeur:
+            await payer_chauffeur(
+                chauffeur=chauffeur,
+                montant=montant,
+                db=db,
+                description=f"Frais colis {colis.code_suivi}",
+            )
+
+    await db.commit()
     return await _reload_colis(colis.id, db)

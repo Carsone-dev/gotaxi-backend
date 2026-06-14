@@ -12,6 +12,9 @@ from app.routers.wallet import router as wallet_router
 from app.routers.transactions import router as transactions_router
 from app.routers.avis import router as avis_router
 from app.routers.notifications import router as notifications_router
+from app.routers.tarifs import router as tarifs_router
+from app.routers.localisation import router as localisation_router
+from app.routers.payout_account import router as payout_account_router
 from app.websockets.tracking import router as ws_router
 
 settings = get_settings()
@@ -59,4 +62,7 @@ app.include_router(transactions_router, prefix=prefix)
 app.include_router(avis_router, prefix=prefix)
 app.include_router(notifications_router, prefix=prefix)
 app.include_router(admin.router, prefix=prefix)
+app.include_router(tarifs_router, prefix=prefix)
+app.include_router(localisation_router, prefix=prefix)
+app.include_router(payout_account_router, prefix=prefix)
 app.include_router(ws_router)

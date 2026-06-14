@@ -43,12 +43,16 @@ class Settings(BaseSettings):
     OTP_EXPIRE_SECONDS: int = 300
     OTP_MAX_ATTEMPTS: int = 5
 
-    # Mobile Money
+    # Mobile Money — MTN MoMo (Collections)
     MTN_MOMO_API_URL: str = ""
     MTN_MOMO_SUBSCRIPTION_KEY: str = ""
     MTN_MOMO_API_USER: str = ""
     MTN_MOMO_API_KEY: str = ""
     MTN_MOMO_TARGET_ENV: str = "sandbox"
+    # MTN MoMo — Disbursements (optionnel, fallback sur collection si vide)
+    MTN_MOMO_DISBURSE_SUB_KEY: str = ""
+    MTN_MOMO_DISBURSE_API_USER: str = ""
+    MTN_MOMO_DISBURSE_API_KEY: str = ""
 
     MOOV_MONEY_API_URL: str = ""
     MOOV_MONEY_MERCHANT_ID: str = ""
@@ -57,6 +61,16 @@ class Settings(BaseSettings):
     ORANGE_MONEY_API_URL: str = ""
     ORANGE_MONEY_CLIENT_ID: str = ""
     ORANGE_MONEY_CLIENT_SECRET: str = ""
+
+    # Celtis (Celtiis Bénin — BiBi Money)
+    CELTIS_API_URL: str = "https://api-sandbox.celtiis.bj"
+    CELTIS_CLIENT_ID: str = ""
+    CELTIS_CLIENT_SECRET: str = ""
+    CELTIS_MERCHANT_ID: str = ""
+
+    # FedaPay (agrégateur — sandbox par défaut)
+    FEDAPAY_API_URL: str = "https://sandbox-api.fedapay.com/v1"
+    FEDAPAY_API_KEY: str = ""
 
     # Twilio
     TWILIO_ACCOUNT_SID: str = ""

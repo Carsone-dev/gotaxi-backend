@@ -28,3 +28,4 @@ class Chauffeur(Base, UUIDMixin, TimestampMixin):
     user = relationship("User", back_populates="chauffeur")
     vehicules = relationship("Vehicule", back_populates="chauffeur")
     voyages = relationship("Voyage", back_populates="chauffeur")
+    compte_payout = relationship("ComptePayoutChauffeur", back_populates="chauffeur", uselist=False)

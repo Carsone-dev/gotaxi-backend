@@ -88,9 +88,9 @@ async def ws_admin_activity(ws: WebSocket, token: str = ""):
             data = await ws.receive_text()
             if data == "ping":
                 await ws.send_text("pong")
-    except WebSocketDisconnect:
-        manager.disconnect(channel, ws)
-    except Exception:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(channel, ws)
 
 
@@ -107,9 +107,9 @@ async def ws_admin_fleet(ws: WebSocket):
             data = await ws.receive_text()
             if data == "ping":
                 await ws.send_text("pong")
-    except WebSocketDisconnect:
-        manager.disconnect(channel, ws)
-    except Exception:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(channel, ws)
 
 
@@ -120,7 +120,9 @@ async def tracking_voyage(ws: WebSocket, voyage_id: UUID):
     try:
         while True:
             await ws.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(channel, ws)
 
 
@@ -131,7 +133,9 @@ async def tracking_colis(ws: WebSocket, colis_id: UUID):
     try:
         while True:
             await ws.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(channel, ws)
 
 
@@ -142,5 +146,7 @@ async def ws_notifications(ws: WebSocket):
     try:
         while True:
             await ws.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
         manager.disconnect(channel, ws)

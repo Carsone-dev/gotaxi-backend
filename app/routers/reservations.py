@@ -11,6 +11,8 @@ from app.models.voyage import Voyage, VoyageStatut
 from app.schemas.reservation import ReservationCreate, ReservationRead
 from app.schemas.common import MessageResponse
 from app.dependencies import get_current_user, require_role
+from app.models.transaction import TransactionType
+from app.services.payout import debiter_wallet_client
 import secrets
 
 
@@ -54,11 +56,13 @@ async def create_reservation(
     if chauffeur_id and voyage.chauffeur_id == chauffeur_id:
         raise HTTPException(status_code=403, detail="Vous ne pouvez pas réserver sur votre propre voyage")
 
+    prix_total = voyage.prix_par_place * payload.nombre_places
+
     reservation = Reservation(
         voyage_id=payload.voyage_id,
         client_id=current_user.id,
         nombre_places=payload.nombre_places,
-        prix_total=voyage.prix_par_place * payload.nombre_places,
+        prix_total=prix_total,
         code_confirmation=secrets.token_hex(3).upper(),
     )
     voyage.nombre_places_restantes -= payload.nombre_places
@@ -66,6 +70,16 @@ async def create_reservation(
         voyage.statut = VoyageStatut.COMPLET
 
     db.add(reservation)
+    await db.flush()
+
+    await debiter_wallet_client(
+        client_user_id=current_user.id,
+        montant=prix_total,
+        type_transaction=TransactionType.PAIEMENT_VOYAGE,
+        db=db,
+        reference_id=str(reservation.id),
+    )
+
     await db.commit()
 
     return await _get_reservation_full(reservation.id, db)

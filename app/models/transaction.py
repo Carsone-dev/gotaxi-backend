@@ -26,6 +26,8 @@ class TransactionOperateur(str, enum.Enum):
     MTN_MOMO = "MTN_MOMO"
     MOOV_MONEY = "MOOV_MONEY"
     ORANGE_MONEY = "ORANGE_MONEY"
+    CELTIS = "CELTIS"
+    FEDAPAY = "FEDAPAY"
     WALLET = "WALLET"
 
 

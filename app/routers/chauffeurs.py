@@ -1,14 +1,16 @@
 from uuid import UUID
-from datetime import date, timezone, datetime
+from datetime import date, timezone, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.user import User, UserRole
 from app.models.chauffeur import Chauffeur
 from app.models.vehicule import Vehicule
 from app.models.voyage import Voyage
+from app.models.wallet import Wallet
+from app.models.transaction import Transaction, TransactionType, TransactionStatut
 from app.schemas.chauffeur import (
     ChauffeurRead, ChauffeurUpdate, ChauffeurPublic,
     VehiculeCreate, VehiculeUpdate, VehiculeRead, PositionUpdate,
@@ -20,6 +22,7 @@ from app.repositories.user_repository import UserRepository
 from app.dependencies import get_current_user, require_role
 from app.utils.validators import validate_image
 from app.websockets.manager import manager
+from app.exceptions import KYCNotValidatedException
 
 router = APIRouter(prefix="/chauffeurs", tags=["Chauffeurs"])
 
@@ -129,7 +132,7 @@ async def go_online(
 ):
     chauffeur = await _get_chauffeur_or_404(current_user, db)
     if not chauffeur.kyc_valide:
-        raise HTTPException(status_code=403, detail="KYC non validé")
+        raise KYCNotValidatedException()
     chauffeur.en_ligne = True
     chauffeur.derniere_activite = date.today()
     await db.commit()
@@ -230,10 +233,39 @@ async def my_revenus(
     current_user: User = Depends(require_chauffeur),
 ):
     chauffeur = await _get_chauffeur_or_404(current_user, db)
+
+    wallet_res = await db.execute(select(Wallet).where(Wallet.user_id == chauffeur.user_id))
+    wallet = wallet_res.scalar_one_or_none()
+
+    aujourd_hui = semaine = mois = 0
+
+    if wallet:
+        TZ_BENIN = timezone(timedelta(hours=1))
+        now = datetime.now(TZ_BENIN)
+        day_start   = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start  = day_start - timedelta(days=day_start.weekday())
+        month_start = day_start.replace(day=1)
+
+        # ECHEC = payout externe raté → wallet crédité en fallback → revenu réel
+        statuts_valides = [TransactionStatut.REUSSI, TransactionStatut.EN_COURS, TransactionStatut.ECHEC]
+
+        base = (
+            select(func.coalesce(func.sum(Transaction.montant), 0))
+            .where(
+                Transaction.wallet_id == wallet.id,
+                Transaction.type == TransactionType.REVERSEMENT,
+                Transaction.statut.in_(statuts_valides),
+            )
+        )
+
+        aujourd_hui = (await db.execute(base.where(Transaction.created_at >= day_start))).scalar() or 0
+        semaine     = (await db.execute(base.where(Transaction.created_at >= week_start))).scalar() or 0
+        mois        = (await db.execute(base.where(Transaction.created_at >= month_start))).scalar() or 0
+
     return RevenusRead(
-        aujourd_hui=0,
-        semaine=0,
-        mois=0,
+        aujourd_hui=aujourd_hui,
+        semaine=semaine,
+        mois=mois,
         total=chauffeur.revenus_total,
     )
 
@@ -279,6 +311,29 @@ async def add_vehicule(
         raise HTTPException(status_code=409, detail="Immatriculation déjà enregistrée")
     vehicule = Vehicule(**payload.model_dump(), chauffeur_id=chauffeur.id)
     db.add(vehicule)
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
+
+
+@router.post("/me/vehicules/{vehicule_id}/photo", response_model=VehiculeRead)
+async def upload_vehicule_photo(
+    vehicule_id: UUID,
+    photo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_chauffeur),
+):
+    chauffeur = await _get_chauffeur_or_404(current_user, db)
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule or vehicule.chauffeur_id != chauffeur.id:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+    content = await photo.read()
+    try:
+        validate_image(photo.content_type or "", len(content))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from app.integrations.s3_storage import upload_file
+    vehicule.photo_url = upload_file(content, "vehicules", photo.filename, photo.content_type or "image/jpeg")
     await db.commit()
     await db.refresh(vehicule)
     return vehicule

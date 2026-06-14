@@ -1,7 +1,7 @@
 import re
 
 
-PHONE_PATTERN = re.compile(r"^\+229\d{10}$|^\+228\d{8}$")
+PHONE_PATTERN = re.compile(r"^\+\d{8,15}$")
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
 
