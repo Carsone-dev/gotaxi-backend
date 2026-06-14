@@ -13,6 +13,11 @@ class ReservationStatut(str, enum.Enum):
     TERMINEE = "TERMINEE"
 
 
+class ModalitePaiementReservation(str, enum.Enum):
+    WALLET  = "WALLET"
+    ESPECES = "ESPECES"
+
+
 class Reservation(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "reservations"
 
@@ -22,6 +27,11 @@ class Reservation(Base, UUIDMixin, TimestampMixin):
     prix_total: Mapped[int] = mapped_column(Integer)
     statut: Mapped[ReservationStatut] = mapped_column(
         Enum(ReservationStatut), default=ReservationStatut.EN_ATTENTE
+    )
+    modalite_paiement: Mapped[ModalitePaiementReservation] = mapped_column(
+        Enum(ModalitePaiementReservation),
+        default=ModalitePaiementReservation.WALLET,
+        server_default=ModalitePaiementReservation.WALLET.value,
     )
     code_confirmation: Mapped[str] = mapped_column(String(6))
     transaction_id: Mapped[UUID | None] = mapped_column(

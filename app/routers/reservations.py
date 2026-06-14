@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.user import User, UserRole
 from app.models.chauffeur import Chauffeur
-from app.models.reservation import Reservation, ReservationStatut
+from app.models.reservation import Reservation, ReservationStatut, ModalitePaiementReservation
 from app.models.voyage import Voyage, VoyageStatut
 from app.schemas.reservation import ReservationCreate, ReservationRead
 from app.schemas.common import MessageResponse
@@ -56,13 +56,21 @@ async def create_reservation(
     if chauffeur_id and voyage.chauffeur_id == chauffeur_id:
         raise HTTPException(status_code=403, detail="Vous ne pouvez pas réserver sur votre propre voyage")
 
+    FRAIS_ESPECES_PAR_PLACE = 200
+
     prix_total = voyage.prix_par_place * payload.nombre_places
+    montant_a_debiter = (
+        FRAIS_ESPECES_PAR_PLACE * payload.nombre_places
+        if payload.modalite_paiement == ModalitePaiementReservation.ESPECES
+        else prix_total
+    )
 
     reservation = Reservation(
         voyage_id=payload.voyage_id,
         client_id=current_user.id,
         nombre_places=payload.nombre_places,
         prix_total=prix_total,
+        modalite_paiement=payload.modalite_paiement,
         code_confirmation=secrets.token_hex(3).upper(),
     )
     voyage.nombre_places_restantes -= payload.nombre_places
@@ -74,7 +82,7 @@ async def create_reservation(
 
     await debiter_wallet_client(
         client_user_id=current_user.id,
-        montant=prix_total,
+        montant=montant_a_debiter,
         type_transaction=TransactionType.PAIEMENT_VOYAGE,
         db=db,
         reference_id=str(reservation.id),
