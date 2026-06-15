@@ -35,6 +35,16 @@ class VehiculeRead(BaseModel):
     nombre_places: int
     climatise: bool
     photo_url: str | None
+    photos_interieures: list[str] = []
+    assurance_url: str | None = None
+    assurance_expiration: date | None = None
+    visite_technique_url: str | None = None
+    visite_technique_expiration: date | None = None
+    titre_url: str | None = None
+    titre_expiration: date | None = None
+    livret_bord_url: str | None = None
+    docs_vehicule_valides: bool = False
+    docs_vehicule_valides_le: date | None = None
     actif: bool
 
     model_config = {"from_attributes": True}

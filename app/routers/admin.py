@@ -938,6 +938,68 @@ async def reject_kyc(
     return {"message": "KYC rejeté"}
 
 
+# ─── Documents véhicules ──────────────────────────────────────────────────────
+
+@router.get("/vehicules/docs-en-attente", response_model=list[VehiculeRead])
+async def vehicules_docs_en_attente(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Véhicules ayant soumis au moins un document en attente de validation admin."""
+    from sqlalchemy import or_
+    result = await db.execute(
+        select(Vehicule)
+        .where(
+            Vehicule.actif == True,
+            Vehicule.docs_vehicule_valides == False,
+            or_(
+                Vehicule.assurance_url != None,
+                Vehicule.visite_technique_url != None,
+                Vehicule.titre_url != None,
+                Vehicule.livret_bord_url != None,
+            ),
+        )
+        .order_by(Vehicule.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/vehicules/{vehicule_id}/valider-docs", response_model=VehiculeRead)
+async def valider_docs_vehicule(
+    vehicule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Valide les documents réglementaires d'un véhicule."""
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+    vehicule.docs_vehicule_valides = True
+    vehicule.docs_vehicule_valides_le = date.today()
+    _log(db, current_user.id, "VALIDER_DOCS_VEHICULE", "vehicules", str(vehicule_id))
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
+
+
+@router.post("/vehicules/{vehicule_id}/rejeter-docs", response_model=VehiculeRead)
+async def rejeter_docs_vehicule(
+    vehicule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Rejette les documents réglementaires d'un véhicule (réinitialise la validation)."""
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+    vehicule.docs_vehicule_valides = False
+    vehicule.docs_vehicule_valides_le = None
+    _log(db, current_user.id, "REJETER_DOCS_VEHICULE", "vehicules", str(vehicule_id))
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
+
+
 # ─── Payout Account (admin) ──────────────────────────────────────────────────
 
 @router.get("/chauffeurs/{chauffeur_id}/payout-account", response_model=ComptePayoutRead)

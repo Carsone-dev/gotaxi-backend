@@ -9,6 +9,7 @@ class VehiculeMin(BaseModel):
     type_vehicule: str
     marque: str
     modele: str
+    photos_interieures: list[str] = []
     model_config = {"from_attributes": True}
 
 

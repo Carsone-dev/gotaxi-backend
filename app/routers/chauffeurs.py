@@ -1,6 +1,6 @@
 from uuid import UUID
 from datetime import date, timezone, datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -370,6 +370,133 @@ async def delete_vehicule(
     vehicule.actif = False
     await db.commit()
     return {"message": "Véhicule supprimé"}
+
+
+@router.post("/me/vehicules/{vehicule_id}/documents", response_model=VehiculeRead)
+async def upload_vehicule_documents(
+    vehicule_id: UUID,
+    assurance: UploadFile | None = File(None),
+    assurance_expiration: str | None = Form(None),
+    visite_technique: UploadFile | None = File(None),
+    visite_technique_expiration: str | None = Form(None),
+    titre: UploadFile | None = File(None),
+    titre_expiration: str | None = Form(None),
+    livret_bord: UploadFile | None = File(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_chauffeur),
+):
+    from datetime import date as date_type
+    from app.integrations.s3_storage import upload_file
+
+    chauffeur = await _get_chauffeur_or_404(current_user, db)
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule or vehicule.chauffeur_id != chauffeur.id:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+
+    async def _save_doc(file: UploadFile, folder: str) -> str:
+        content = await file.read()
+        try:
+            validate_image(file.content_type or "", len(content))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return upload_file(content, folder, file.filename, file.content_type or "image/jpeg")
+
+    if assurance:
+        vehicule.assurance_url = await _save_doc(assurance, "vehicules/docs")
+        if assurance_expiration:
+            try:
+                vehicule.assurance_expiration = date_type.fromisoformat(assurance_expiration)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Format de date invalide pour assurance_expiration (YYYY-MM-DD)")
+    elif assurance_expiration:
+        try:
+            vehicule.assurance_expiration = date_type.fromisoformat(assurance_expiration)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Format de date invalide pour assurance_expiration (YYYY-MM-DD)")
+
+    if visite_technique:
+        vehicule.visite_technique_url = await _save_doc(visite_technique, "vehicules/docs")
+        if visite_technique_expiration:
+            try:
+                vehicule.visite_technique_expiration = date_type.fromisoformat(visite_technique_expiration)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Format de date invalide pour visite_technique_expiration (YYYY-MM-DD)")
+    elif visite_technique_expiration:
+        try:
+            vehicule.visite_technique_expiration = date_type.fromisoformat(visite_technique_expiration)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Format de date invalide pour visite_technique_expiration (YYYY-MM-DD)")
+
+    if titre:
+        vehicule.titre_url = await _save_doc(titre, "vehicules/docs")
+        if titre_expiration:
+            try:
+                vehicule.titre_expiration = date_type.fromisoformat(titre_expiration)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Format de date invalide pour titre_expiration (YYYY-MM-DD)")
+    elif titre_expiration:
+        try:
+            vehicule.titre_expiration = date_type.fromisoformat(titre_expiration)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Format de date invalide pour titre_expiration (YYYY-MM-DD)")
+
+    if livret_bord:
+        vehicule.livret_bord_url = await _save_doc(livret_bord, "vehicules/docs")
+
+    # Réinitialise la validation admin dès qu'un nouveau doc est soumis
+    vehicule.docs_vehicule_valides = False
+    vehicule.docs_vehicule_valides_le = None
+
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
+
+
+@router.post("/me/vehicules/{vehicule_id}/photos-interieures", response_model=VehiculeRead)
+async def upload_vehicule_interior_photo(
+    vehicule_id: UUID,
+    photo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_chauffeur),
+):
+    chauffeur = await _get_chauffeur_or_404(current_user, db)
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule or vehicule.chauffeur_id != chauffeur.id:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+    if len(vehicule.photos_interieures or []) >= 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 photos intérieures autorisées")
+    content = await photo.read()
+    try:
+        validate_image(photo.content_type or "", len(content))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from app.integrations.s3_storage import upload_file
+    url = upload_file(content, "vehicules/interieurs", photo.filename, photo.content_type or "image/jpeg")
+    vehicule.photos_interieures = list(vehicule.photos_interieures or []) + [url]
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
+
+
+@router.delete("/me/vehicules/{vehicule_id}/photos-interieures/{index}", response_model=VehiculeRead)
+async def delete_vehicule_interior_photo(
+    vehicule_id: UUID,
+    index: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_chauffeur),
+):
+    chauffeur = await _get_chauffeur_or_404(current_user, db)
+    vehicule = await db.get(Vehicule, vehicule_id)
+    if not vehicule or vehicule.chauffeur_id != chauffeur.id:
+        raise HTTPException(status_code=404, detail="Véhicule introuvable")
+    photos = list(vehicule.photos_interieures or [])
+    if index < 0 or index >= len(photos):
+        raise HTTPException(status_code=400, detail="Index invalide")
+    photos.pop(index)
+    vehicule.photos_interieures = photos
+    await db.commit()
+    await db.refresh(vehicule)
+    return vehicule
 
 
 @router.get("/{chauffeur_id}", response_model=ChauffeurPublic)
