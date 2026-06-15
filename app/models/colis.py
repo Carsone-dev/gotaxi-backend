@@ -1,6 +1,7 @@
 import enum
+from datetime import datetime
 from uuid import UUID
-from sqlalchemy import String, Numeric, ForeignKey, Enum, Boolean
+from sqlalchemy import String, Numeric, Integer, ForeignKey, Enum, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UUIDMixin
 
@@ -15,7 +16,8 @@ class ColisCategorie(str, enum.Enum):
 
 
 class ColisStatut(str, enum.Enum):
-    EN_ATTENTE = "EN_ATTENTE"
+    EN_ATTENTE_PAIEMENT = "EN_ATTENTE_PAIEMENT"  # frais plateforme non encore payés
+    EN_ATTENTE = "EN_ATTENTE"                      # frais payés, visible aux chauffeurs
     CONFIRME = "CONFIRME"
     EN_TRANSIT = "EN_TRANSIT"
     LIVRE = "LIVRE"
@@ -23,8 +25,9 @@ class ColisStatut(str, enum.Enum):
 
 
 class ColisModalitePaiement(str, enum.Enum):
-    A_LA_CONFIRMATION = "A_LA_CONFIRMATION"  # client paie quand le chauffeur accepte
-    A_LA_LIVRAISON = "A_LA_LIVRAISON"        # client paie à la livraison
+    """Conservé pour compatibilité avec les anciennes lignes en base."""
+    A_LA_CONFIRMATION = "A_LA_CONFIRMATION"
+    A_LA_LIVRAISON = "A_LA_LIVRAISON"
 
 
 class Colis(Base, UUIDMixin, TimestampMixin):
@@ -40,13 +43,21 @@ class Colis(Base, UUIDMixin, TimestampMixin):
     fragile: Mapped[bool] = mapped_column(Boolean, default=False)
     destinataire_nom: Mapped[str] = mapped_column(String(100))
     destinataire_telephone: Mapped[str] = mapped_column(String(20))
+    # Prix indicatif du transport (négocié entre client et chauffeur, non géré par la plateforme)
     prix: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
-    modalite_paiement: Mapped[ColisModalitePaiement] = mapped_column(
-        Enum(ColisModalitePaiement), default=ColisModalitePaiement.A_LA_LIVRAISON
-    )
-    statut: Mapped[ColisStatut] = mapped_column(Enum(ColisStatut), default=ColisStatut.EN_ATTENTE)
+    statut: Mapped[ColisStatut] = mapped_column(Enum(ColisStatut), default=ColisStatut.EN_ATTENTE_PAIEMENT)
     code_suivi: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Frais de mise en relation collectés par la plateforme (100 FCFA)
+    frais_plateforme: Mapped[int] = mapped_column(Integer, default=100)
+    # Référence transaction FedaPay pour le paiement des frais
+    fedapay_transaction_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Expiration du délai de paiement (15 min après création)
+    paiement_expire_a: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Conservé nullable pour compatibilité historique
+    modalite_paiement: Mapped[ColisModalitePaiement | None] = mapped_column(
+        Enum(ColisModalitePaiement), nullable=True
+    )
 
     expediteur = relationship("User", foreign_keys=[expediteur_id])
     voyage = relationship("Voyage", back_populates="colis")

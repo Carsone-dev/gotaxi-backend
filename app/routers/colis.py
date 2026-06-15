@@ -1,6 +1,7 @@
 import secrets
 import string
 import uuid as _uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
@@ -12,11 +13,16 @@ from app.models.user import User, UserRole
 from app.models.chauffeur import Chauffeur
 from app.models.colis import Colis, ColisStatut
 from app.models.voyage import Voyage, VoyageStatut
-from app.schemas.colis import ColisCreate, ColisRead
+from app.schemas.colis import ColisCreate, ColisRead, ColisPaiementStatutRead
+from app.schemas.reservation import InitierPaiementPayload
 from app.dependencies import get_current_user
 from app.services.colis_pricing import calculer_prix_colis
-from app.services.payout import debiter_wallet_client, payer_chauffeur
-from app.models.transaction import TransactionType
+from app.services.frais_plateforme import (
+    initier_paiement_colis,
+    verifier_et_confirmer_colis,
+    FRAIS_COLIS_PLATEFORME,
+    PAIEMENT_EXPIRATION_MINUTES,
+)
 
 _MEDIA_DIR = Path(__file__).resolve().parents[2] / "media" / "colis"
 _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,7 +80,7 @@ async def _require_chauffeur_owns_voyage(colis: Colis, user: User, db: AsyncSess
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Créer un colis (client)
+# 1. Créer un colis → EN_ATTENTE_PAIEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("", response_model=ColisRead, status_code=201)
@@ -105,6 +111,8 @@ async def create_colis(
         lng_arrivee=voyage.lng_arrivee,
     )
 
+    expire_a = datetime.now(timezone.utc) + timedelta(minutes=PAIEMENT_EXPIRATION_MINUTES)
+
     colis = Colis(
         voyage_id=payload.voyage_id,
         expediteur_id=current_user.id,
@@ -116,19 +124,67 @@ async def create_colis(
         fragile=payload.fragile,
         destinataire_nom=payload.destinataire_nom,
         destinataire_telephone=payload.destinataire_telephone,
-        modalite_paiement=payload.modalite_paiement,
-        statut=ColisStatut.EN_ATTENTE,
+        statut=ColisStatut.EN_ATTENTE_PAIEMENT,
+        frais_plateforme=FRAIS_COLIS_PLATEFORME,
+        paiement_expire_a=expire_a,
         code_suivi=_generate_code_suivi(),
         prix=prix,
         photo_url=None,
     )
     db.add(colis)
-    await db.flush()
+    await db.commit()
 
     result = await db.execute(
         select(Colis).options(selectinload(Colis.voyage)).where(Colis.id == colis.id)
     )
     return result.scalar_one()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Initier le paiement FedaPay des frais colis
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{colis_id}/initier-paiement")
+async def initier_paiement_colis_endpoint(
+    colis_id: UUID,
+    payload: InitierPaiementPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    colis = await db.get(Colis, colis_id)
+    if not colis:
+        raise HTTPException(status_code=404, detail="Colis introuvable")
+    if colis.expediteur_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès non autorisé")
+    if colis.statut != ColisStatut.EN_ATTENTE_PAIEMENT:
+        raise HTTPException(status_code=409, detail="Paiement non attendu pour ce colis")
+    if colis.paiement_expire_a and datetime.now(timezone.utc) > colis.paiement_expire_a:
+        raise HTTPException(status_code=410, detail="Le délai de paiement a expiré")
+
+    result = await initier_paiement_colis(colis, payload.telephone, db)
+    await db.commit()
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vérifier le statut du paiement colis (polling)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{colis_id}/statut-paiement", response_model=ColisPaiementStatutRead)
+async def statut_paiement_colis(
+    colis_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    colis = await db.get(Colis, colis_id)
+    if not colis:
+        raise HTTPException(status_code=404, detail="Colis introuvable")
+    if colis.expediteur_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès non autorisé")
+
+    statut = await verifier_et_confirmer_colis(colis, db)
+    await db.commit()
+    return ColisPaiementStatutRead(statut=statut, colis_statut=colis.statut)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,7 +208,6 @@ async def my_colis(
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Colis d'un voyage (vue chauffeur)
 # ─────────────────────────────────────────────────────────────────────────────
-# Défini avant /{colis_id} pour éviter la collision de route
 
 @router.get("/voyage/{voyage_id}", response_model=list[ColisRead])
 async def colis_du_voyage(
@@ -178,7 +233,7 @@ async def colis_du_voyage(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Upload photo d'un colis (client expéditeur uniquement)
+# 3. Upload photo d'un colis
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/photo", response_model=ColisRead)
@@ -243,7 +298,7 @@ async def get_colis(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Annuler un colis (client ou chauffeur)
+# Annuler un colis (client ou chauffeur)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/annuler", response_model=ColisRead)
@@ -253,7 +308,13 @@ async def annuler_colis(
     current_user: User = Depends(get_current_user),
 ):
     colis = await _get_colis_with_voyage(colis_id, db)
-    _require_statut(colis, ColisStatut.EN_ATTENTE)
+
+    annulable = {ColisStatut.EN_ATTENTE_PAIEMENT, ColisStatut.EN_ATTENTE}
+    if colis.statut not in annulable:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Action impossible : statut actuel '{colis.statut}'",
+        )
 
     is_expediteur = colis.expediteur_id == current_user.id
     is_chauffeur_du_voyage = False
@@ -267,12 +328,12 @@ async def annuler_colis(
         raise HTTPException(status_code=403, detail="Accès refusé")
 
     colis.statut = ColisStatut.ANNULE
-    await db.flush()
+    await db.commit()
     return await _reload_colis(colis.id, db)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Confirmer un colis (chauffeur accepte)
+# Confirmer un colis (chauffeur accepte)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/confirmer", response_model=ColisRead)
@@ -281,43 +342,17 @@ async def confirmer_colis(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.models.colis import ColisModalitePaiement
     colis = await _get_colis_with_voyage(colis_id, db)
     _require_statut(colis, ColisStatut.EN_ATTENTE)
     await _require_chauffeur_owns_voyage(colis, current_user, db)
 
     colis.statut = ColisStatut.CONFIRME
-    await db.flush()
-
-    # Paiement immédiat si modalité A_LA_CONFIRMATION
-    if colis.modalite_paiement == ColisModalitePaiement.A_LA_CONFIRMATION and colis.prix:
-        montant = int(colis.prix)
-        await debiter_wallet_client(
-            client_user_id=colis.expediteur_id,
-            montant=montant,
-            type_transaction=TransactionType.PAIEMENT_COLIS,
-            db=db,
-            reference_id=str(colis.id),
-        )
-        # Reverser immédiatement au chauffeur
-        chauffeur_result = await db.execute(
-            select(Chauffeur).where(Chauffeur.id == colis.voyage.chauffeur_id)
-        )
-        chauffeur = chauffeur_result.scalar_one_or_none()
-        if chauffeur:
-            await payer_chauffeur(
-                chauffeur=chauffeur,
-                montant=montant,
-                db=db,
-                description=f"Frais colis {colis.code_suivi}",
-            )
-
     await db.commit()
     return await _reload_colis(colis.id, db)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Mettre en transit
+# Mettre en transit
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/en_transit", response_model=ColisRead)
@@ -337,12 +372,12 @@ async def mettre_en_transit(
         )
 
     colis.statut = ColisStatut.EN_TRANSIT
-    await db.flush()
+    await db.commit()
     return await _reload_colis(colis.id, db)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. Marquer comme livré
+# Marquer comme livré
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/{colis_id}/livrer", response_model=ColisRead)
@@ -351,35 +386,10 @@ async def livrer_colis(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    from app.models.colis import ColisModalitePaiement
     colis = await _get_colis_with_voyage(colis_id, db)
     _require_statut(colis, ColisStatut.EN_TRANSIT)
     await _require_chauffeur_owns_voyage(colis, current_user, db)
 
     colis.statut = ColisStatut.LIVRE
-    await db.flush()
-
-    # Paiement + reversement à la livraison si modalité A_LA_LIVRAISON
-    if colis.modalite_paiement == ColisModalitePaiement.A_LA_LIVRAISON and colis.prix:
-        montant = int(colis.prix)
-        await debiter_wallet_client(
-            client_user_id=colis.expediteur_id,
-            montant=montant,
-            type_transaction=TransactionType.PAIEMENT_COLIS,
-            db=db,
-            reference_id=str(colis.id),
-        )
-        chauffeur_result = await db.execute(
-            select(Chauffeur).where(Chauffeur.id == colis.voyage.chauffeur_id)
-        )
-        chauffeur = chauffeur_result.scalar_one_or_none()
-        if chauffeur:
-            await payer_chauffeur(
-                chauffeur=chauffeur,
-                montant=montant,
-                db=db,
-                description=f"Frais colis {colis.code_suivi}",
-            )
-
     await db.commit()
     return await _reload_colis(colis.id, db)

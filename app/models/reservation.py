@@ -1,12 +1,14 @@
 import enum
+from datetime import datetime
 from uuid import UUID
-from sqlalchemy import Integer, ForeignKey, Enum, String
+from sqlalchemy import Integer, ForeignKey, Enum, String, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UUIDMixin
 
 
 class ReservationStatut(str, enum.Enum):
-    EN_ATTENTE = "EN_ATTENTE"
+    EN_ATTENTE_PAIEMENT = "EN_ATTENTE_PAIEMENT"  # frais plateforme non encore payés
+    EN_ATTENTE = "EN_ATTENTE"                      # frais payés, chauffeur doit accepter
     CONFIRMEE = "CONFIRMEE"
     REFUSEE = "REFUSEE"
     ANNULEE = "ANNULEE"
@@ -14,7 +16,8 @@ class ReservationStatut(str, enum.Enum):
 
 
 class ModalitePaiementReservation(str, enum.Enum):
-    WALLET  = "WALLET"
+    """Conservé pour compatibilité avec les anciennes lignes en base."""
+    WALLET = "WALLET"
     ESPECES = "ESPECES"
 
 
@@ -26,14 +29,19 @@ class Reservation(Base, UUIDMixin, TimestampMixin):
     nombre_places: Mapped[int] = mapped_column(Integer)
     prix_total: Mapped[int] = mapped_column(Integer)
     statut: Mapped[ReservationStatut] = mapped_column(
-        Enum(ReservationStatut), default=ReservationStatut.EN_ATTENTE
+        Enum(ReservationStatut), default=ReservationStatut.EN_ATTENTE_PAIEMENT
     )
-    modalite_paiement: Mapped[ModalitePaiementReservation] = mapped_column(
-        Enum(ModalitePaiementReservation),
-        default=ModalitePaiementReservation.WALLET,
-        server_default=ModalitePaiementReservation.WALLET.value,
-    )
+    # Frais de mise en relation collectés par la plateforme (200 FCFA × nb_places)
+    frais_plateforme: Mapped[int] = mapped_column(Integer, default=200)
+    # Référence transaction FedaPay pour le paiement des frais
+    fedapay_transaction_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Expiration du délai de paiement (15 min après création)
+    paiement_expire_a: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     code_confirmation: Mapped[str] = mapped_column(String(6))
+    # Conservé nullable pour compatibilité historique
+    modalite_paiement: Mapped[ModalitePaiementReservation | None] = mapped_column(
+        Enum(ModalitePaiementReservation), nullable=True
+    )
     transaction_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("transactions.id"), nullable=True
     )

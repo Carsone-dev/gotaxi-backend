@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,13 +7,22 @@ from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.user import User, UserRole
 from app.models.chauffeur import Chauffeur
-from app.models.reservation import Reservation, ReservationStatut, ModalitePaiementReservation
+from app.models.reservation import Reservation, ReservationStatut
 from app.models.voyage import Voyage, VoyageStatut
-from app.schemas.reservation import ReservationCreate, ReservationRead
+from app.schemas.reservation import (
+    ReservationCreate,
+    ReservationRead,
+    InitierPaiementPayload,
+    PaiementStatutRead,
+)
 from app.schemas.common import MessageResponse
 from app.dependencies import get_current_user, require_role
-from app.models.transaction import TransactionType
-from app.services.payout import debiter_wallet_client
+from app.services.frais_plateforme import (
+    initier_paiement_reservation,
+    verifier_et_confirmer_reservation,
+    FRAIS_RESERVATION_PAR_PLACE,
+    PAIEMENT_EXPIRATION_MINUTES,
+)
 import secrets
 
 
@@ -38,6 +48,10 @@ async def _get_chauffeur_id(user: User, db: AsyncSession) -> UUID | None:
     return result.scalar_one_or_none()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Créer une réservation → EN_ATTENTE_PAIEMENT, places bloquées
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.post("", response_model=ReservationRead, status_code=201)
 async def create_reservation(
     payload: ReservationCreate,
@@ -56,21 +70,18 @@ async def create_reservation(
     if chauffeur_id and voyage.chauffeur_id == chauffeur_id:
         raise HTTPException(status_code=403, detail="Vous ne pouvez pas réserver sur votre propre voyage")
 
-    FRAIS_ESPECES_PAR_PLACE = 200
-
+    frais = FRAIS_RESERVATION_PAR_PLACE * payload.nombre_places
     prix_total = voyage.prix_par_place * payload.nombre_places
-    montant_a_debiter = (
-        FRAIS_ESPECES_PAR_PLACE * payload.nombre_places
-        if payload.modalite_paiement == ModalitePaiementReservation.ESPECES
-        else prix_total
-    )
+    expire_a = datetime.now(timezone.utc) + timedelta(minutes=PAIEMENT_EXPIRATION_MINUTES)
 
     reservation = Reservation(
         voyage_id=payload.voyage_id,
         client_id=current_user.id,
         nombre_places=payload.nombre_places,
         prix_total=prix_total,
-        modalite_paiement=payload.modalite_paiement,
+        frais_plateforme=frais,
+        statut=ReservationStatut.EN_ATTENTE_PAIEMENT,
+        paiement_expire_a=expire_a,
         code_confirmation=secrets.token_hex(3).upper(),
     )
     voyage.nombre_places_restantes -= payload.nombre_places
@@ -78,27 +89,67 @@ async def create_reservation(
         voyage.statut = VoyageStatut.COMPLET
 
     db.add(reservation)
-    await db.flush()
-
-    await debiter_wallet_client(
-        client_user_id=current_user.id,
-        montant=montant_a_debiter,
-        type_transaction=TransactionType.PAIEMENT_VOYAGE,
-        db=db,
-        reference_id=str(reservation.id),
-    )
-
     await db.commit()
 
     return await _get_reservation_full(reservation.id, db)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Initier le paiement FedaPay (USSD push)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{reservation_id}/initier-paiement")
+async def initier_paiement(
+    reservation_id: UUID,
+    payload: InitierPaiementPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    reservation = await db.get(Reservation, reservation_id)
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Réservation introuvable")
+    if reservation.client_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès non autorisé")
+    if reservation.statut != ReservationStatut.EN_ATTENTE_PAIEMENT:
+        raise HTTPException(status_code=409, detail="Paiement non attendu pour cette réservation")
+    if reservation.paiement_expire_a and datetime.now(timezone.utc) > reservation.paiement_expire_a:
+        raise HTTPException(status_code=410, detail="Le délai de paiement a expiré")
+
+    result = await initier_paiement_reservation(reservation, payload.telephone, db)
+    await db.commit()
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vérifier le statut du paiement (polling)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{reservation_id}/statut-paiement", response_model=PaiementStatutRead)
+async def statut_paiement(
+    reservation_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    reservation = await db.get(Reservation, reservation_id)
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Réservation introuvable")
+    if reservation.client_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Accès non autorisé")
+
+    statut = await verifier_et_confirmer_reservation(reservation, db)
+    await db.commit()
+    return PaiementStatutRead(statut=statut, reservation_statut=reservation.statut)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Historique client
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/me", response_model=list[ReservationRead])
 async def my_reservations(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Client : historique de ses réservations avec détails du voyage."""
     result = await db.execute(
         select(Reservation)
         .options(selectinload(Reservation.voyage))
@@ -113,7 +164,7 @@ async def my_incoming_reservations(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.CHAUFFEUR)),
 ):
-    """Chauffeur : demandes EN_ATTENTE et CONFIRMEE sur ses voyages — avec info client."""
+    """Chauffeur : demandes EN_ATTENTE et CONFIRMEE sur ses voyages."""
     chauffeur_id = await _get_chauffeur_id(current_user, db)
     if not chauffeur_id:
         raise HTTPException(status_code=404, detail="Profil chauffeur introuvable")
@@ -136,7 +187,6 @@ async def get_reservation(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Détail d'une réservation : voyage embedded pour le client, client embedded pour le chauffeur."""
     reservation = await _get_reservation_full(reservation_id, db)
     if not reservation:
         raise HTTPException(status_code=404, detail="Réservation introuvable")
@@ -150,13 +200,16 @@ async def get_reservation(
     return reservation
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Actions chauffeur
+# ─────────────────────────────────────────────────────────────────────────────
+
 @router.post("/{reservation_id}/accept", response_model=ReservationRead)
 async def accept_reservation(
     reservation_id: UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.CHAUFFEUR)),
 ):
-    """Chauffeur accepte → CONFIRMEE. Retourne la réservation avec info client."""
     chauffeur_id = await _get_chauffeur_id(current_user, db)
     reservation = await db.get(Reservation, reservation_id)
     if not reservation:
@@ -179,7 +232,6 @@ async def reject_reservation(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_role(UserRole.CHAUFFEUR)),
 ):
-    """Chauffeur refuse → REFUSEE. Places restituées au voyage."""
     chauffeur_id = await _get_chauffeur_id(current_user, db)
     reservation = await db.get(Reservation, reservation_id)
     if not reservation:
@@ -219,7 +271,12 @@ async def cancel_reservation(
         if not chauffeur_id or not voyage_check or voyage_check.chauffeur_id != chauffeur_id:
             raise HTTPException(status_code=403, detail="Non autorisé à annuler cette réservation")
 
-    if reservation.statut not in (ReservationStatut.EN_ATTENTE, ReservationStatut.CONFIRMEE):
+    annulable = {
+        ReservationStatut.EN_ATTENTE_PAIEMENT,
+        ReservationStatut.EN_ATTENTE,
+        ReservationStatut.CONFIRMEE,
+    }
+    if reservation.statut not in annulable:
         raise HTTPException(status_code=400, detail="Réservation non annulable dans cet état")
 
     voyage = await db.get(Voyage, reservation.voyage_id)

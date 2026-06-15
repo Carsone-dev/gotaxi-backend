@@ -147,6 +147,27 @@ def initiate_payment(self, transaction_id: str, amount: int, phone: str, operate
         raise self.retry(exc=exc, countdown=5)
 
 
+@celery_app.task
+def annuler_paiements_expires():
+    """Annule les réservations et colis EN_ATTENTE_PAIEMENT dont le délai de 15 min est dépassé."""
+    async def _run():
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from app.config import get_settings
+        from app.services.frais_plateforme import annuler_paiements_expires_async
+
+        settings = get_settings()
+        engine = create_async_engine(settings.DATABASE_URL)
+        SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async with SessionLocal() as db:
+            result = await annuler_paiements_expires_async(db)
+            if result["reservations_annulees"] or result["colis_annules"]:
+                logger.info("paiements_expires_annules", **result)
+        await engine.dispose()
+
+    _run_async(_run())
+
+
 # Alias pour compatibilité avec l'ancienne tâche
 check_pending_momo = check_pending_payments
 initiate_momo_payment = initiate_payment

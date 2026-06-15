@@ -37,5 +37,9 @@ celery_app.conf.update(
             "task": "app.tasks.sms_tasks.cleanup_expired_sessions",
             "schedule": 3600.0,
         },
+        "annuler-paiements-expires": {
+            "task": "app.tasks.payment_tasks.annuler_paiements_expires",
+            "schedule": 60.0,
+        },
     },
 )

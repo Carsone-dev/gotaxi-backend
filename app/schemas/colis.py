@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel, Field
-from app.models.colis import ColisCategorie, ColisStatut, ColisModalitePaiement
+from app.models.colis import ColisCategorie, ColisStatut
 from app.schemas.voyage import VoyageRead
 
 
@@ -13,7 +13,6 @@ class ColisCreate(BaseModel):
     fragile: bool = False
     destinataire_nom: str = Field(..., max_length=100)
     destinataire_telephone: str = Field(..., max_length=20)
-    modalite_paiement: ColisModalitePaiement = ColisModalitePaiement.A_LA_LIVRAISON
 
 
 class ColisRead(BaseModel):
@@ -29,12 +28,18 @@ class ColisRead(BaseModel):
     destinataire_nom: str
     destinataire_telephone: str
     prix: float | None
-    modalite_paiement: ColisModalitePaiement
+    frais_plateforme: int
     statut: ColisStatut
     code_suivi: str
     photo_url: str | None
+    paiement_expire_a: datetime | None = None
     voyage: VoyageRead | None = None
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ColisPaiementStatutRead(BaseModel):
+    statut: str  # 'confirme' | 'en_attente' | 'echec' | 'expire' | 'non_initie'
+    colis_statut: ColisStatut
