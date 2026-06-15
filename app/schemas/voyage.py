@@ -4,6 +4,14 @@ from pydantic import BaseModel, Field
 from app.models.voyage import VoyageStatut
 
 
+class VehiculeMin(BaseModel):
+    photo_url: str | None
+    type_vehicule: str
+    marque: str
+    modele: str
+    model_config = {"from_attributes": True}
+
+
 class VoyageCreate(BaseModel):
     ville_depart: str
     ville_arrivee: str
@@ -51,6 +59,10 @@ class VoyageRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class VoyagePublicRead(VoyageRead):
+    vehicule: VehiculeMin | None = None
 
 
 class VoyageSearch(BaseModel):

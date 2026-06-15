@@ -8,7 +8,7 @@ from app.models.voyage import Voyage, VoyageStatut
 from app.models.ville import Ville
 from app.models.colis import Colis
 from app.models.demande_chauffeur import DemandeInscriptionChauffeur
-from app.schemas.voyage import VoyageRead
+from app.schemas.voyage import VoyageRead, VoyagePublicRead
 from app.schemas.colis import ColisRead
 from app.schemas.common import PaginatedResponse, MessageResponse
 from app.schemas.demande_chauffeur import DemandeChauffeurCreate
@@ -45,7 +45,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.get("/voyages", response_model=PaginatedResponse[VoyageRead])
+@router.get("/voyages", response_model=PaginatedResponse[VoyagePublicRead])
 async def public_list_voyages(
     ville_depart: str | None = Query(None),
     ville_arrivee: str | None = Query(None),
@@ -86,7 +86,9 @@ async def public_list_voyages(
     total = (await db.execute(select(func.count(Voyage.id)).where(*filters))).scalar() or 0
     items = (
         await db.execute(
-            select(Voyage).where(*filters).order_by(order).offset((page - 1) * size).limit(size)
+            select(Voyage)
+            .options(selectinload(Voyage.vehicule))
+            .where(*filters).order_by(order).offset((page - 1) * size).limit(size)
         )
     ).scalars().all()
 
@@ -94,7 +96,7 @@ async def public_list_voyages(
     return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
 
 
-@router.get("/voyages/search", response_model=PaginatedResponse[VoyageRead])
+@router.get("/voyages/search", response_model=PaginatedResponse[VoyagePublicRead])
 async def public_search_voyages(
     ville_depart: str = Query(...),
     ville_arrivee: str = Query(...),
@@ -132,7 +134,9 @@ async def public_search_voyages(
     total = (await db.execute(select(func.count(Voyage.id)).where(*filters))).scalar() or 0
     items = (
         await db.execute(
-            select(Voyage).where(*filters).order_by(order).offset((page - 1) * size).limit(size)
+            select(Voyage)
+            .options(selectinload(Voyage.vehicule))
+            .where(*filters).order_by(order).offset((page - 1) * size).limit(size)
         )
     ).scalars().all()
 
