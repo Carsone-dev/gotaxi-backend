@@ -46,6 +46,57 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/voyages", response_model=PaginatedResponse[VoyageRead])
+async def public_list_voyages(
+    ville_depart: str | None = Query(None),
+    ville_arrivee: str | None = Query(None),
+    date_depart: date | None = Query(None),
+    nombre_places: int = Query(1, ge=1),
+    prix_max: int | None = Query(None),
+    accepte_colis: bool | None = Query(None),
+    sort_by: str = Query("depart_asc"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Voyages disponibles sans filtres obligatoires — pour la page découverte."""
+    filters = [
+        Voyage.statut == VoyageStatut.PUBLIE,
+        Voyage.nombre_places_restantes >= nombre_places,
+        Voyage.date_depart >= datetime.now(timezone.utc),
+    ]
+    if ville_depart:
+        filters.append(Voyage.ville_depart.ilike(f"%{ville_depart}%"))
+    if ville_arrivee:
+        filters.append(Voyage.ville_arrivee.ilike(f"%{ville_arrivee}%"))
+    if date_depart:
+        day_start = datetime(date_depart.year, date_depart.month, date_depart.day, tzinfo=timezone.utc)
+        filters.append(Voyage.date_depart >= day_start)
+        filters.append(Voyage.date_depart < day_start + timedelta(days=1))
+    if prix_max is not None:
+        filters.append(Voyage.prix_par_place <= prix_max)
+    if accepte_colis is not None:
+        filters.append(Voyage.accepte_colis == accepte_colis)
+
+    sort_map = {
+        "prix_asc": Voyage.prix_par_place.asc(),
+        "prix_desc": Voyage.prix_par_place.desc(),
+        "depart_asc": Voyage.date_depart.asc(),
+        "depart_desc": Voyage.date_depart.desc(),
+    }
+    order = sort_map.get(sort_by, Voyage.date_depart.asc())
+
+    total = (await db.execute(select(func.count(Voyage.id)).where(*filters))).scalar() or 0
+    items = (
+        await db.execute(
+            select(Voyage).where(*filters).order_by(order).offset((page - 1) * size).limit(size)
+        )
+    ).scalars().all()
+
+    pages = max(1, -(-total // size))
+    return PaginatedResponse(items=items, total=total, page=page, size=size, pages=pages)
+
+
 @router.get("/voyages/search", response_model=PaginatedResponse[VoyageRead])
 async def public_search_voyages(
     ville_depart: str = Query(...),
