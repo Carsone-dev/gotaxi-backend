@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -59,12 +59,8 @@ async def public_list_voyages(
     db: AsyncSession = Depends(get_db),
 ):
     """Voyages disponibles sans filtres obligatoires — pour la page découverte."""
-    # Début du jour courant en UTC — inclut les voyages d'aujourd'hui même si l'heure est passée
-    today_start = datetime.combine(date.today(), time(0, 0, 0), tzinfo=timezone.utc)
-
     filters = [
         Voyage.statut.in_([VoyageStatut.PUBLIE, VoyageStatut.COMPLET]),
-        Voyage.date_depart >= today_start,
     ]
     if ville_depart:
         filters.append(Voyage.ville_depart.ilike(f"%{ville_depart}%"))
