@@ -5,6 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.models.voyage import Voyage, VoyageStatut
+from app.models.ville import Ville
 from app.models.colis import Colis
 from app.models.demande_chauffeur import DemandeInscriptionChauffeur
 from app.schemas.voyage import VoyageRead
@@ -13,12 +14,6 @@ from app.schemas.common import PaginatedResponse, MessageResponse
 from app.schemas.demande_chauffeur import DemandeChauffeurCreate
 
 router = APIRouter(prefix="/public", tags=["Public"])
-
-VILLES = [
-    "Cotonou", "Porto-Novo", "Parakou", "Abomey-Calavi",
-    "Bohicon", "Natitingou", "Kandi", "Lokossa",
-    "Ouidah", "Abomey", "Djougou",
-]
 
 
 @router.get("/health")
@@ -33,16 +28,20 @@ async def health_db(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/villes")
-async def get_villes():
-    return {"villes": VILLES}
+async def get_villes(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Ville.nom).where(Ville.actif == True).order_by(Ville.nom)
+    )
+    return {"villes": result.scalars().all()}
 
 
 @router.get("/stats")
 async def get_stats(db: AsyncSession = Depends(get_db)):
-    count = await db.execute(select(func.count()).select_from(Voyage))
+    total_voyages = (await db.execute(select(func.count()).select_from(Voyage))).scalar() or 0
+    total_villes = (await db.execute(select(func.count()).select_from(Ville).where(Ville.actif == True))).scalar() or 0
     return {
-        "total_voyages": count.scalar() or 0,
-        "villes_desservies": len(VILLES),
+        "total_voyages": total_voyages,
+        "villes_desservies": total_villes,
     }
 
 
