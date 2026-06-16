@@ -20,6 +20,7 @@ from app.dependencies import get_current_user, require_role
 from app.services.frais_plateforme import (
     initier_paiement_reservation,
     verifier_et_confirmer_reservation,
+    expirer_reservations_voyage,
     FRAIS_RESERVATION_PAR_PLACE,
     PAIEMENT_EXPIRATION_MINUTES,
 )
@@ -61,6 +62,9 @@ async def create_reservation(
     voyage = await db.get(Voyage, payload.voyage_id)
     if not voyage:
         raise HTTPException(status_code=404, detail="Voyage introuvable")
+
+    await expirer_reservations_voyage(voyage, db)
+
     if voyage.statut != VoyageStatut.PUBLIE:
         raise HTTPException(status_code=409, detail="Ce voyage n'accepte plus de réservations")
     if voyage.nombre_places_restantes < payload.nombre_places:
@@ -115,7 +119,7 @@ async def initier_paiement(
     if reservation.paiement_expire_a and datetime.now(timezone.utc) > reservation.paiement_expire_a:
         raise HTTPException(status_code=410, detail="Le délai de paiement a expiré")
 
-    result = await initier_paiement_reservation(reservation, payload.telephone, db)
+    result = await initier_paiement_reservation(reservation, payload.telephone, db, current_user)
     await db.commit()
     return result
 

@@ -2,12 +2,14 @@
 
 Flux réservation :
   POST /reservations              → crée en EN_ATTENTE_PAIEMENT, places bloquées
-  POST /reservations/{id}/initier-paiement  → lance FedaPay, USSD sur téléphone client
+  POST /reservations/{id}/initier-paiement  → crée la transaction FedaPay + retourne payment_url
+                                               (le client doit ouvrir ce lien pour choisir son
+                                               opérateur Mobile Money et recevoir le push USSD)
   GET  /reservations/{id}/statut-paiement  → poll, confirme → EN_ATTENTE si payé
 
 Flux colis :
   POST /colis                     → crée en EN_ATTENTE_PAIEMENT
-  POST /colis/{id}/initier-paiement        → lance FedaPay
+  POST /colis/{id}/initier-paiement        → crée la transaction FedaPay + retourne payment_url
   GET  /colis/{id}/statut-paiement         → poll, confirme → EN_ATTENTE si payé
 
 Tâche Celery (toutes les 60s) : annule les paiements expirés (>15 min).
@@ -18,6 +20,7 @@ from sqlalchemy import select
 from app.models.reservation import Reservation, ReservationStatut
 from app.models.colis import Colis, ColisStatut
 from app.models.voyage import Voyage, VoyageStatut
+from app.models.user import User
 from app.models.transaction import Transaction, TransactionType, TransactionStatut, TransactionOperateur
 from app.integrations.fedapay import fedapay
 from app.core.logging import logger
@@ -33,17 +36,26 @@ async def initier_paiement_reservation(
     reservation: Reservation,
     telephone: str,
     db: AsyncSession,
+    user: User,
 ) -> dict:
-    """Crée la transaction FedaPay et envoie le USSD sur le téléphone du client."""
+    """Crée la transaction FedaPay et retourne le lien de checkout à ouvrir."""
     tx_id = await fedapay.create_transaction(
         amount=reservation.frais_plateforme,
         description=f"Frais réservation GoTaxi #{reservation.code_confirmation}",
         phone=telephone,
+        customer_firstname=user.prenom,
+        customer_lastname=user.nom,
+        customer_email=user.email,
     )
+    token_data = await fedapay.get_payment_token(tx_id)
     reservation.fedapay_transaction_id = str(tx_id)
     await db.flush()
     logger.info("paiement_reservation_initie", reservation_id=str(reservation.id), tx_id=tx_id)
-    return {"fedapay_tx_id": tx_id, "montant": reservation.frais_plateforme}
+    return {
+        "fedapay_tx_id": tx_id,
+        "montant": reservation.frais_plateforme,
+        "payment_url": token_data.get("payment_url") or token_data.get("url"),
+    }
 
 
 async def verifier_et_confirmer_reservation(
@@ -93,6 +105,22 @@ async def _valider_paiement_reservation(reservation: Reservation, db: AsyncSessi
     logger.info("paiement_reservation_confirme", reservation_id=str(reservation.id))
 
 
+async def expirer_reservations_voyage(voyage: Voyage, db: AsyncSession) -> None:
+    """Libère immédiatement les places bloquées par des réservations EN_ATTENTE_PAIEMENT
+    expirées sur ce voyage, sans attendre le passage de la tâche Celery périodique
+    (utile si Celery beat n'est pas démarré en dev, ou pour réagir plus vite)."""
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(Reservation).where(
+            Reservation.voyage_id == voyage.id,
+            Reservation.statut == ReservationStatut.EN_ATTENTE_PAIEMENT,
+            Reservation.paiement_expire_a <= now,
+        )
+    )
+    for r in result.scalars():
+        await _annuler_reservation(r, db, raison="expire")
+
+
 async def _annuler_reservation(
     reservation: Reservation, db: AsyncSession, raison: str
 ) -> None:
@@ -112,17 +140,26 @@ async def initier_paiement_colis(
     colis: Colis,
     telephone: str,
     db: AsyncSession,
+    user: User,
 ) -> dict:
-    """Crée la transaction FedaPay pour les frais colis."""
+    """Crée la transaction FedaPay pour les frais colis et retourne le lien de checkout."""
     tx_id = await fedapay.create_transaction(
         amount=colis.frais_plateforme,
         description=f"Frais colis GoTaxi {colis.code_suivi}",
         phone=telephone,
+        customer_firstname=user.prenom,
+        customer_lastname=user.nom,
+        customer_email=user.email,
     )
+    token_data = await fedapay.get_payment_token(tx_id)
     colis.fedapay_transaction_id = str(tx_id)
     await db.flush()
     logger.info("paiement_colis_initie", colis_id=str(colis.id), tx_id=tx_id)
-    return {"fedapay_tx_id": tx_id, "montant": colis.frais_plateforme}
+    return {
+        "fedapay_tx_id": tx_id,
+        "montant": colis.frais_plateforme,
+        "payment_url": token_data.get("payment_url") or token_data.get("url"),
+    }
 
 
 async def verifier_et_confirmer_colis(

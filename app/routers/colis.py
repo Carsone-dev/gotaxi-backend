@@ -161,7 +161,7 @@ async def initier_paiement_colis_endpoint(
     if colis.paiement_expire_a and datetime.now(timezone.utc) > colis.paiement_expire_a:
         raise HTTPException(status_code=410, detail="Le délai de paiement a expiré")
 
-    result = await initier_paiement_colis(colis, payload.telephone, db)
+    result = await initier_paiement_colis(colis, payload.telephone, db, current_user)
     await db.commit()
     return result
 

@@ -74,6 +74,7 @@ class FedaPayClient:
         phone: str | None = None,
         customer_firstname: str = "Client",
         customer_lastname: str = "GoTaxi",
+        customer_email: str | None = None,
     ) -> int:
         """Crée une transaction FedaPay et retourne son id numérique.
 
@@ -88,6 +89,8 @@ class FedaPayClient:
                 "number": self._normalize_phone_bj(phone),
                 "country": "BJ",
             }
+        if customer_email:
+            customer["email"] = customer_email
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
