@@ -56,3 +56,4 @@ class Transaction(Base, UUIDMixin, TimestampMixin):
     metadata_json: Mapped[str | None] = mapped_column(String(2000), nullable=True)
 
     wallet = relationship("Wallet", back_populates="transactions")
+    user = relationship("User", foreign_keys=[user_id])

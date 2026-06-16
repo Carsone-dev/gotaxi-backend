@@ -49,6 +49,9 @@ class TransactionRead(BaseModel):
     statut: TransactionStatut
     operateur: TransactionOperateur
     montant: int
+    reference_externe: str | None = None
+    reservation_id: UUID | None = None
+    colis_id: UUID | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

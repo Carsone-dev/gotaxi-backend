@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, update
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, aliased
 from app.core.database import get_db
 from app.core.security import hash_password
 from app.models.user import User, UserRole, UserStatus
@@ -46,6 +46,7 @@ from sqlalchemy.exc import IntegrityError
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 require_admin = require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+require_super_admin = require_role(UserRole.SUPER_ADMIN)
 
 
 # ─── Dashboard ───────────────────────────────────────────────────────────────
@@ -241,6 +242,73 @@ async def dashboard_momo_stats(
         }
         for r in rows
     ]
+
+
+@router.get("/dashboard/benefices")
+async def dashboard_benefices(
+    period: str = Query("30d", pattern="^(7d|30d|90d)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_super_admin),
+):
+    """Bénéfices de la plateforme : frais de mise en relation (réservations + colis),
+    collectés exclusivement via le compte FedaPay unique de l'application."""
+    days = {"7d": 7, "30d": 30, "90d": 90}[period]
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    async def _total_et_count(t: TransactionType) -> tuple[int, int]:
+        row = (await db.execute(
+            select(
+                func.coalesce(func.sum(Transaction.montant), 0),
+                func.count(Transaction.id),
+            ).where(
+                Transaction.type == t,
+                Transaction.statut == TransactionStatut.REUSSI,
+                Transaction.created_at >= since,
+            )
+        )).one()
+        return int(row[0]), int(row[1])
+
+    total_reservation, nb_reservation = await _total_et_count(TransactionType.FRAIS_RESERVATION)
+    total_colis, nb_colis = await _total_et_count(TransactionType.FRAIS_COLIS)
+
+    rows = (await db.execute(
+        select(
+            func.date(Transaction.created_at).label("jour"),
+            Transaction.type,
+            func.coalesce(func.sum(Transaction.montant), 0).label("total"),
+        )
+        .where(
+            Transaction.type.in_([TransactionType.FRAIS_RESERVATION, TransactionType.FRAIS_COLIS]),
+            Transaction.statut == TransactionStatut.REUSSI,
+            Transaction.created_at >= since,
+        )
+        .group_by(func.date(Transaction.created_at), Transaction.type)
+        .order_by(func.date(Transaction.created_at))
+    )).all()
+
+    par_jour: dict[str, dict[str, int]] = {}
+    for r in rows:
+        jour = str(r.jour)
+        par_jour.setdefault(jour, {"frais_reservation": 0, "frais_colis": 0})
+        if r.type == TransactionType.FRAIS_RESERVATION:
+            par_jour[jour]["frais_reservation"] = int(r.total)
+        else:
+            par_jour[jour]["frais_colis"] = int(r.total)
+
+    evolution = [
+        {"date": jour, **vals, "total": vals["frais_reservation"] + vals["frais_colis"]}
+        for jour, vals in sorted(par_jour.items())
+    ]
+
+    return {
+        "total_frais_reservation": total_reservation,
+        "total_frais_colis": total_colis,
+        "total_general": total_reservation + total_colis,
+        "nb_reservations_payees": nb_reservation,
+        "nb_colis_payees": nb_colis,
+        "evolution": evolution,
+        "compte_collecte": "FedaPay — compte unique de la plateforme",
+    }
 
 
 # ─── Utilisateurs ────────────────────────────────────────────────────────────
@@ -1438,7 +1506,7 @@ async def list_transactions(
 ):
     from app.models.wallet import Wallet as WalletModel
     from app.models.user import User as UserModel
-    from sqlalchemy import or_, ilike_op
+    from sqlalchemy import or_
 
     filters = []
     if statut:
@@ -1451,20 +1519,24 @@ async def list_transactions(
         try: filters.append(Transaction.operateur == TransactionOperateur(operateur))
         except ValueError: pass
 
-    # Base query — always join wallet+user so we can search and serialize
+    # Résolution de l'utilisateur :
+    # - nouveau modèle (frais plateforme) → Transaction.user_id direct
+    # - ancien modèle (wallet) → via wallet_id → wallet.user_id
+    WalletUser = aliased(UserModel)
+    DirectUser = aliased(UserModel)
     base_q = (
         select(Transaction)
         .join(WalletModel, Transaction.wallet_id == WalletModel.id, isouter=True)
-        .join(UserModel, WalletModel.user_id == UserModel.id, isouter=True)
+        .join(WalletUser, WalletModel.user_id == WalletUser.id, isouter=True)
+        .join(DirectUser, Transaction.user_id == DirectUser.id, isouter=True)
         .where(*filters)
     )
     if search and search.strip():
         term = f"%{search.strip()}%"
         base_q = base_q.where(
             or_(
-                UserModel.nom.ilike(term),
-                UserModel.prenom.ilike(term),
-                UserModel.telephone.ilike(term),
+                WalletUser.nom.ilike(term), WalletUser.prenom.ilike(term), WalletUser.telephone.ilike(term),
+                DirectUser.nom.ilike(term), DirectUser.prenom.ilike(term), DirectUser.telephone.ilike(term),
             )
         )
 
@@ -1474,7 +1546,10 @@ async def list_transactions(
 
     result = await db.execute(
         base_q
-        .options(selectinload(Transaction.wallet).selectinload(Wallet.user))
+        .options(
+            selectinload(Transaction.wallet).selectinload(Wallet.user),
+            selectinload(Transaction.user),
+        )
         .order_by(Transaction.created_at.desc())
         .offset((page - 1) * size)
         .limit(size)
@@ -1483,9 +1558,8 @@ async def list_transactions(
 
     def _serialize(t: Transaction) -> dict:
         base = TransactionRead.model_validate(t).model_dump()
-        base["reference_externe"] = t.reference_externe
-        if t.wallet and t.wallet.user:
-            u = t.wallet.user
+        u = t.user or (t.wallet.user if t.wallet else None)
+        if u:
             base["user"] = {"id": str(u.id), "nom": u.nom, "prenom": u.prenom, "telephone": u.telephone, "role": u.role}
         else:
             base["user"] = None
