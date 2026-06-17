@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, update
+from sqlalchemy import select, func, and_, update, Integer
 from sqlalchemy.orm import selectinload, aliased
 from app.core.database import get_db
 from app.core.security import hash_password
@@ -953,6 +953,57 @@ async def list_chauffeurs(
     }
 
 
+@router.get("/chauffeurs/classement-avis")
+async def classement_chauffeurs_avis(
+    limit: int = Query(10, ge=1, le=50),
+    ordre: str = Query("desc", pattern="^(asc|desc)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Classement des chauffeurs par note moyenne (meilleurs ou pires)."""
+    order_fn = func.avg(Avis.note).desc() if ordre == "desc" else func.avg(Avis.note).asc()
+
+    rows = (await db.execute(
+        select(
+            Avis.cible_id,
+            func.avg(Avis.note).label("note_moy"),
+            func.count(Avis.id).label("nb_avis"),
+            func.sum(func.cast(Avis.signale, Integer)).label("nb_signales"),
+        )
+        .where(Avis.visible == True)
+        .group_by(Avis.cible_id)
+        .having(func.count(Avis.id) >= 1)
+        .order_by(order_fn)
+        .limit(limit)
+    )).all()
+
+    user_ids = [r.cible_id for r in rows]
+    users_map: dict[UUID, User] = {}
+    if user_ids:
+        users_res = await db.execute(select(User).where(User.id.in_(user_ids)))
+        users_map = {u.id: u for u in users_res.scalars().all()}
+
+    chauffeurs_map: dict[UUID, Chauffeur] = {}
+    if user_ids:
+        ch_res = await db.execute(select(Chauffeur).where(Chauffeur.user_id.in_(user_ids)))
+        chauffeurs_map = {c.user_id: c for c in ch_res.scalars().all()}
+
+    return [
+        {
+            "rang": i + 1,
+            "chauffeur_id": str(chauffeurs_map[r.cible_id].id) if r.cible_id in chauffeurs_map else None,
+            "user_id": str(r.cible_id),
+            "nom": users_map[r.cible_id].nom if r.cible_id in users_map else None,
+            "prenom": users_map[r.cible_id].prenom if r.cible_id in users_map else None,
+            "photo_url": users_map[r.cible_id].photo_url if r.cible_id in users_map else None,
+            "note_moyenne": round(float(r.note_moy), 2),
+            "nb_avis": r.nb_avis,
+            "nb_signales": int(r.nb_signales or 0),
+        }
+        for i, r in enumerate(rows)
+    ]
+
+
 @router.get("/chauffeurs/{user_id}")
 async def get_chauffeur(
     user_id: UUID,
@@ -1223,6 +1274,137 @@ async def restaurer_avis(
     _log(db, current_user.id, "RESTAURER_AVIS", "avis", str(avis_id))
     await db.commit()
     return {"message": "Avis restauré"}
+
+
+@router.get("/avis/stats")
+async def avis_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Statistiques globales des avis : distribution des notes, signalés, masqués."""
+    total = (await db.execute(select(func.count()).select_from(Avis))).scalar() or 0
+    signales = (await db.execute(
+        select(func.count()).select_from(Avis).where(Avis.signale == True)
+    )).scalar() or 0
+    masques = (await db.execute(
+        select(func.count()).select_from(Avis).where(Avis.visible == False)
+    )).scalar() or 0
+
+    note_rows = (await db.execute(
+        select(Avis.note, func.count(Avis.id).label("count"))
+        .where(Avis.visible == True)
+        .group_by(Avis.note)
+        .order_by(Avis.note)
+    )).all()
+
+    note_moyenne_row = (await db.execute(
+        select(func.avg(Avis.note)).where(Avis.visible == True)
+    )).scalar()
+
+    distribution = {str(i): 0 for i in range(1, 6)}
+    for r in note_rows:
+        distribution[str(r.note)] = r.count
+
+    return {
+        "total": total,
+        "signales": signales,
+        "masques": masques,
+        "note_moyenne_globale": round(float(note_moyenne_row), 2) if note_moyenne_row else 0,
+        "distribution_notes": distribution,
+    }
+
+
+@router.get("/chauffeurs/{chauffeur_id}/performance")
+async def chauffeur_performance(
+    chauffeur_id: UUID,
+    period: str = Query("30d", pattern="^(7d|30d|90d|all)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Rapport de performance d'un chauffeur : notes, commentaires, évolution."""
+    chauffeur = await db.get(Chauffeur, chauffeur_id)
+    if not chauffeur:
+        raise HTTPException(status_code=404, detail="Chauffeur introuvable")
+
+    user = await db.get(User, chauffeur.user_id)
+
+    now = datetime.now(timezone.utc)
+    since = None if period == "all" else now - timedelta(days={"7d": 7, "30d": 30, "90d": 90}[period])
+
+    base_filter = [Avis.cible_id == chauffeur.user_id, Avis.visible == True]
+    if since:
+        base_filter.append(Avis.created_at >= since)
+
+    avis_rows = (await db.execute(
+        select(Avis).where(*base_filter).order_by(Avis.created_at.desc())
+    )).scalars().all()
+
+    total = len(avis_rows)
+    note_moyenne = round(sum(a.note for a in avis_rows) / total, 2) if total else 0
+
+    distribution = {str(i): 0 for i in range(1, 6)}
+    for a in avis_rows:
+        distribution[str(a.note)] += 1
+
+    signales = sum(1 for a in avis_rows if a.signale)
+
+    evolution_rows = (await db.execute(
+        select(
+            func.date(Avis.created_at).label("jour"),
+            func.avg(Avis.note).label("note_moy"),
+            func.count(Avis.id).label("nb"),
+        )
+        .where(*base_filter)
+        .group_by(func.date(Avis.created_at))
+        .order_by(func.date(Avis.created_at))
+    )).all()
+
+    nb_voyages_period_filter = [Voyage.chauffeur_id == chauffeur_id, Voyage.statut == VoyageStatut.TERMINE]
+    if since:
+        nb_voyages_period_filter.append(Voyage.date_depart >= since)
+    nb_voyages = (await db.execute(
+        select(func.count()).select_from(Voyage).where(*nb_voyages_period_filter)
+    )).scalar() or 0
+
+    taux_avis = round(total / nb_voyages * 100, 1) if nb_voyages > 0 else 0
+
+    derniers_commentaires = [
+        {
+            "avis_id": str(a.id),
+            "note": a.note,
+            "commentaire": a.commentaire,
+            "tags": a.tags,
+            "voyage_id": str(a.voyage_id) if a.voyage_id else None,
+            "created_at": a.created_at.isoformat(),
+        }
+        for a in avis_rows[:10]
+        if a.commentaire
+    ]
+
+    return {
+        "chauffeur_id": str(chauffeur_id),
+        "chauffeur_user_id": str(chauffeur.user_id),
+        "nom": user.nom if user else None,
+        "prenom": user.prenom if user else None,
+        "photo_url": user.photo_url if user else None,
+        "note_moyenne_globale": float(user.note_moyenne) if user else 0,
+        "nombre_avis_total": user.nombre_avis if user else 0,
+        "period": period,
+        "stats_period": {
+            "nb_avis": total,
+            "note_moyenne": note_moyenne,
+            "distribution_notes": distribution,
+            "nb_signales": signales,
+            "nb_voyages_termines": nb_voyages,
+            "taux_avis_pct": taux_avis,
+        },
+        "evolution": [
+            {"date": str(r.jour), "note_moyenne": round(float(r.note_moy), 2), "nb_avis": r.nb}
+            for r in evolution_rows
+        ],
+        "derniers_commentaires": derniers_commentaires,
+    }
+
 
 
 # ─── Audit logs ──────────────────────────────────────────────────────────────

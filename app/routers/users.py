@@ -1,5 +1,5 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
@@ -55,7 +55,6 @@ async def update_fcm_token(
 
 @router.post("/me/photo", response_model=UserRead)
 async def upload_photo(
-    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -66,11 +65,7 @@ async def upload_photo(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     from app.integrations.s3_storage import upload_file
-    url = upload_file(content, "profiles", file.filename, file.content_type or "image/jpeg")
-    if url.startswith("/"):
-        base = str(request.base_url).rstrip("/")
-        url = f"{base}{url}"
-    current_user.photo_url = url
+    current_user.photo_url = upload_file(content, "profiles", file.filename, file.content_type or "image/jpeg")
     await db.commit()
     await db.refresh(current_user)
     return current_user

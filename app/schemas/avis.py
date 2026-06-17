@@ -4,8 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class AvisCreate(BaseModel):
-    cible_id: UUID
-    voyage_id: UUID | None = None
+    voyage_id: UUID
     note: int = Field(..., ge=1, le=5)
     commentaire: str | None = Field(None, max_length=1000)
     tags: list[str] = []
@@ -24,3 +23,9 @@ class AvisRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AvisPublicRead(AvisRead):
+    auteur_prenom: str | None = None
+    auteur_nom: str | None = None
+    auteur_photo_url: str | None = None

@@ -4,7 +4,7 @@ import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -238,7 +238,6 @@ async def colis_du_voyage(
 
 @router.post("/{colis_id}/photo", response_model=ColisRead)
 async def upload_colis_photo(
-    request: Request,
     colis_id: UUID,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
@@ -261,8 +260,7 @@ async def upload_colis_photo(
     dest = _MEDIA_DIR / filename
     dest.write_bytes(data)
 
-    base = str(request.base_url).rstrip("/")
-    colis.photo_url = f"{base}/media/colis/{filename}"
+    colis.photo_url = f"/media/colis/{filename}"
     await db.commit()
 
     result = await db.execute(
