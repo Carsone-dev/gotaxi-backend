@@ -18,6 +18,12 @@ class UserStatus(str, enum.Enum):
     SUPPRIME = "SUPPRIME"
 
 
+class GenreUser(str, enum.Enum):
+    HOMME = "HOMME"
+    FEMME = "FEMME"
+    NON_DEFINI = "NON_DEFINI"
+
+
 class User(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "users"
 
@@ -26,6 +32,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     nom: Mapped[str] = mapped_column(String(100))
     prenom: Mapped[str] = mapped_column(String(100))
     photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    genre: Mapped[GenreUser] = mapped_column(Enum(GenreUser), default=GenreUser.NON_DEFINI)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.CLIENT)
     statut: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIF)

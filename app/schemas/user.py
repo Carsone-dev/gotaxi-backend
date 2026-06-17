@@ -1,7 +1,7 @@
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel
-from app.models.user import UserRole, UserStatus
+from app.models.user import UserRole, UserStatus, GenreUser
 
 
 class UserRead(BaseModel):
@@ -11,6 +11,7 @@ class UserRead(BaseModel):
     nom: str
     prenom: str
     photo_url: str | None
+    genre: GenreUser
     role: UserRole
     statut: UserStatus
     telephone_verifie: bool
@@ -27,6 +28,7 @@ class UserUpdate(BaseModel):
     prenom: str | None = None
     email: str | None = None
     langue: str | None = None
+    genre: GenreUser | None = None
 
 
 class UserPublic(BaseModel):
