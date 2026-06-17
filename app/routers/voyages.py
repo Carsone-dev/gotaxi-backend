@@ -1,6 +1,7 @@
 from uuid import UUID
 from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update as sa_update
 from sqlalchemy.orm import selectinload
@@ -193,6 +194,44 @@ async def create_voyage(
         raise KYCNotValidatedException()
     if not chauffeur.en_ligne:
         raise HTTPException(status_code=403, detail="Vous devez être en ligne pour publier un trajet")
+
+    voyage_actif = (await db.execute(
+        select(Voyage).where(
+            Voyage.chauffeur_id == chauffeur.id,
+            Voyage.statut.in_([
+                VoyageStatut.PUBLIE,
+                VoyageStatut.COMPLET,
+                VoyageStatut.EN_COURS,
+            ]),
+        )
+    )).scalar_one_or_none()
+    if voyage_actif:
+        _statut_label = {
+            VoyageStatut.PUBLIE:   "Publié — en attente de passagers",
+            VoyageStatut.COMPLET:  "Complet — prêt au départ",
+            VoyageStatut.EN_COURS: "En cours",
+        }.get(voyage_actif.statut, voyage_actif.statut.value)
+
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "VOYAGE_ACTIF_EXISTANT",
+                "message": "Vous avez déjà un voyage actif.",
+                "detail": "Terminez ou annulez votre voyage en cours avant d'en créer un nouveau.",
+                "voyage_actif": {
+                    "id": str(voyage_actif.id),
+                    "statut": voyage_actif.statut.value,
+                    "statut_label": _statut_label,
+                    "ville_depart": voyage_actif.ville_depart,
+                    "ville_arrivee": voyage_actif.ville_arrivee,
+                    "point_depart": voyage_actif.point_depart,
+                    "date_depart": voyage_actif.date_depart.isoformat(),
+                    "nombre_places_restantes": voyage_actif.nombre_places_restantes,
+                    "nombre_places_total": voyage_actif.nombre_places_total,
+                    "prix_par_place": voyage_actif.prix_par_place,
+                },
+            },
+        )
 
     vehicule = await db.get(Vehicule, payload.vehicule_id)
     if not vehicule or vehicule.chauffeur_id != chauffeur.id or not vehicule.actif:
