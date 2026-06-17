@@ -9,6 +9,7 @@ from app.models.user import User, UserRole
 from app.models.chauffeur import Chauffeur
 from app.models.reservation import Reservation, ReservationStatut
 from app.models.voyage import Voyage, VoyageStatut
+from app.models.avis import Avis
 from app.schemas.reservation import (
     ReservationCreate,
     ReservationRead,
@@ -179,6 +180,32 @@ async def my_incoming_reservations(
         .where(
             Voyage.chauffeur_id == chauffeur_id,
             Reservation.statut.in_([ReservationStatut.EN_ATTENTE, ReservationStatut.CONFIRMEE]),
+        )
+        .order_by(Reservation.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/me/a-noter", response_model=list[ReservationRead])
+async def reservations_a_noter(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Voyages terminés pour lesquels le client n'a pas encore laissé d'avis."""
+    # Sous-requête : voyage_ids déjà notés par ce client
+    deja_notes = (
+        select(Avis.voyage_id)
+        .where(Avis.auteur_id == current_user.id, Avis.voyage_id.isnot(None))
+        .scalar_subquery()
+    )
+
+    result = await db.execute(
+        select(Reservation)
+        .options(selectinload(Reservation.voyage))
+        .where(
+            Reservation.client_id == current_user.id,
+            Reservation.statut == ReservationStatut.TERMINEE,
+            Reservation.voyage_id.notin_(deja_notes),
         )
         .order_by(Reservation.created_at.desc())
     )

@@ -18,6 +18,7 @@ from app.exceptions import KYCNotValidatedException
 from app.models.tarif_trajet import TarifTrajet
 from app.models.ville import Ville
 from app.services.payout import payer_chauffeur
+from app.integrations.fcm import send_push_multicast
 
 router = APIRouter(prefix="/voyages", tags=["Voyages"])
 
@@ -333,6 +334,26 @@ async def end_voyage(
         )
 
     await db.commit()
+
+    # Push FCM aux passagers pour les inviter à noter le chauffeur
+    tokens_result = await db.execute(
+        select(User.fcm_token)
+        .join(Reservation, Reservation.client_id == User.id)
+        .where(
+            Reservation.voyage_id == voyage_id,
+            Reservation.statut == ReservationStatut.TERMINEE,
+            User.fcm_token.isnot(None),
+        )
+    )
+    tokens = [t for (t,) in tokens_result.all() if t]
+    if tokens:
+        send_push_multicast(
+            tokens=tokens,
+            title="Comment s'est passé votre trajet ?",
+            body="Prenez 10 secondes pour noter votre chauffeur.",
+            data={"type": "DEMANDE_AVIS", "voyage_id": str(voyage_id)},
+        )
+
     return {"message": "Voyage terminé"}
 
 
